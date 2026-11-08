@@ -1,4 +1,5 @@
 import { meshWGSL, instWGSL, volumeWGSL } from './shaders.js';
+export { createFluidSurface } from './fluid.js';
 import { mat4, Vector3 } from '../math.js';
 
 const MSAA = 4;
@@ -96,8 +97,9 @@ export class Renderer {
 
     const meshMod = d.createShaderModule({ code: meshWGSL, label: 'mesh' });
     const instMod = d.createShaderModule({ code: instWGSL, label: 'inst' });
-    const volMod = d.createShaderModule({ code: volumeWGSL, label: 'volume' });
-    for (const m of [meshMod, instMod, volMod]) {
+    const volMod = d.createShaderModule({ code: volumeWGSL(false), label: 'volume' });
+    const fluidMod = d.createShaderModule({ code: volumeWGSL(true), label: 'fluid surface' });
+    for (const m of [meshMod, instMod, volMod, fluidMod]) {
       m.getCompilationInfo().then((info) => {
         for (const msg of info.messages) console[msg.type === 'error' ? 'error' : 'warn'](`WGSL ${m.label}: ${msg.lineNum}:${msg.linePos} ${msg.message}`);
       });
@@ -153,6 +155,18 @@ export class Renderer {
         layout: layout(this.bglVol),
         vertex: { module: volMod, entryPoint: 'vs', buffers: VERTEX_LAYOUT_POS },
         fragment: { module: volMod, entryPoint: 'fs', targets: color },
+        primitive: { topology: 'triangle-list', cullMode: 'front' },
+      })),
+      fluid: d.createRenderPipeline(main({
+        layout: layout(this.bglVol),
+        vertex: { module: fluidMod, entryPoint: 'vs', buffers: VERTEX_LAYOUT_POS },
+        fragment: { module: fluidMod, entryPoint: 'fs', targets: color },
+        primitive: { topology: 'triangle-list', cullMode: 'front' },
+      })),
+      fluidShadow: d.createRenderPipeline(shadow({
+        layout: layout(this.bglVol),
+        vertex: { module: fluidMod, entryPoint: 'vs', buffers: VERTEX_LAYOUT_POS },
+        fragment: { module: fluidMod, entryPoint: 'fsShadow', targets: [] },
         primitive: { topology: 'triangle-list', cullMode: 'front' },
       })),
       meshShadow: d.createRenderPipeline(shadow({
@@ -238,14 +252,15 @@ export class Renderer {
 
   /**
    * GPU side of an SdfGrid: r8unorm distance texture + rgba8unorm colour texture. With
-   * `external`, the textures are written by the GPU simulation (src/gpu/sim) and sync() does nothing.
+   * `external`, the textures are written elsewhere (streamed patches, or `textures` = [distance, colour]
+   * filled by a compute pass) and sync() does nothing.
    */
-  createVolume(grid, boxMesh, { external = false } = {}) {
+  createVolume(grid, boxMesh, { external = false, textures = null } = {}) {
     const d = this.device;
     const size = [grid.nx, grid.ny, grid.nz];
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
-    const sdf = d.createTexture({ size, dimension: '3d', format: 'r8unorm', usage });
-    const col = d.createTexture({ size, dimension: '3d', format: 'rgba8unorm', usage });
+    const sdf = textures ? textures[0] : d.createTexture({ size, dimension: '3d', format: 'r8unorm', usage });
+    const col = textures ? textures[1] : d.createTexture({ size, dimension: '3d', format: 'rgba8unorm', usage });
     const buf = d.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const data = new Float32Array(40);
     data.set([grid.sx, grid.sy, grid.sz, grid.band, grid.cell, 0, 0, 0], 32);
@@ -309,19 +324,20 @@ export class Renderer {
     this.depthTex = this.device.createTexture({ size: [w, h], sampleCount: MSAA, format: DEPTH_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT });
   }
 
-  _writeFrame(buf, viewProj, lightVP, camPos, ortho, lightDir, rayDir) {
+  _writeFrame(buf, viewProj, lightVP, camPos, ortho, lightDir, rayDir, debug = 0) {
     const f = this.frameData;
     f.set(viewProj, 0);
     f.set(lightVP, 16);
     f.set([camPos.x, camPos.y, camPos.z, ortho ? 1 : 0], 32);
-    f.set([lightDir.x, lightDir.y, lightDir.z, 0], 36);
+    f.set([lightDir.x, lightDir.y, lightDir.z, debug], 36);
     f.set([rayDir.x, rayDir.y, rayDir.z, 0], 40);
     this.device.queue.writeBuffer(buf, 0, f, 0, 44);
   }
 
   /**
    * scene = { objects: [..opaque], ghosts: [..], instances: [..], overlays: [..], volumes: [..],
-   *           shadowCasters: { objects, instances, volumes } }
+   *           fluids: [..createFluidSurface()], shadowCasters: { objects, instances, volumes, fluids },
+   *           debug: 0 shaded | 1 normals | 2 albedo | 3 march steps, shadows: bool }
    */
   render(scene, camera, light) {
     this.resize();
@@ -334,10 +350,12 @@ export class Renderer {
     const e = light.extent;
     const lightVP = mat4.multiply(mat4.ortho(-e, e, -e * 0.7, e * 0.7, 0.2, 2.0), lightView);
     const rayDir = new Vector3().copy(light.dir).multiplyScalar(-1);
-    this._writeFrame(this.frameBuf, viewProj, lightVP, camera.eye(), false, light.dir, rayDir);
+    this._writeFrame(this.frameBuf, viewProj, lightVP, camera.eye(), false, light.dir, rayDir, scene.debug ?? 0);
     this._writeFrame(this.shadowFrameBuf, lightVP, lightVP, eye, true, light.dir, rayDir);
 
     const enc = this.device.createCommandEncoder();
+    const fluids = (scene.fluids ?? []).filter((f) => f.vol.visible && f.box);
+    for (const f of fluids) f.encode(enc);
     // shadow pass
     {
       const pass = enc.beginRenderPass({
@@ -346,9 +364,12 @@ export class Renderer {
       });
       pass.setBindGroup(0, this.shadowFrameBG);
       const sc = scene.shadowCasters;
-      this._drawObjects(pass, this.pipes.meshShadow, sc.objects);
-      this._drawInstances(pass, this.pipes.instShadow, sc.instances);
-      this._drawVolumes(pass, this.pipes.volumeShadow, sc.volumes);
+      if (scene.shadows !== false) {
+        this._drawObjects(pass, this.pipes.meshShadow, sc.objects);
+        this._drawInstances(pass, this.pipes.instShadow, sc.instances);
+        this._drawVolumes(pass, this.pipes.volumeShadow, sc.volumes);
+        this._drawVolumes(pass, this.pipes.fluidShadow, fluids.filter((f) => (sc.fluids ?? []).includes(f)).map((f) => f.vol));
+      }
       pass.end();
     }
     // camera pass
@@ -368,6 +389,7 @@ export class Renderer {
       pass.setBindGroup(0, this.frameBG);
       this._drawObjects(pass, this.pipes.mesh, scene.objects);
       this._drawVolumes(pass, this.pipes.volume, scene.volumes);
+      this._drawVolumes(pass, this.pipes.fluid, fluids.map((f) => f.vol));
       this._drawInstances(pass, this.pipes.inst, scene.instances);
       this._drawObjects(pass, this.pipes.ghost, scene.ghosts);
       this._drawInstances(pass, this.pipes.overlay, scene.overlays);

@@ -40,6 +40,13 @@ fn envColor(r : vec3f, rough : f32) -> vec3f {
   return c;
 }
 
+// debug view (F.lightDir.w): 0 shaded, 1 normals, 2 albedo (unlit), 3 sphere-tracing steps
+fn debugMode() -> i32 { return i32(F.lightDir.w + 0.5); }
+fn heat(t : f32) -> vec3f {
+  let x = clamp(t, 0.0, 1.0);
+  return clamp(vec3f(1.5 - abs(4.0 * x - 3.0), 1.5 - abs(4.0 * x - 2.0), 1.5 - abs(4.0 * x - 1.0)), vec3f(0.0), vec3f(1.0));
+}
+
 fn aces(x : vec3f) -> vec3f {
   return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
 }
@@ -107,6 +114,9 @@ fn wood(p : vec3f) -> vec3f {
 @fragment fn fs(i : VOut) -> @location(0) vec4f {
   var alb = O.color.rgb;
   if (O.mat.w > 0.5) { alb = wood(i.wp); }
+  let m = debugMode();
+  if (m == 1) { return vec4f(normalize(i.n) * 0.5 + 0.5, O.mat.z); }
+  if (m == 2) { return vec4f(pow(alb, vec3f(1.0 / 2.2)), O.mat.z); }
   let c = shade(alb, normalize(i.n), i.wp, O.mat.x, O.mat.y);
   return vec4f(toScreen(c), O.mat.z);
 }
@@ -139,6 +149,9 @@ struct VOut {
 
 @fragment fn fs(i : VOut) -> @location(0) vec4f {
   if (O.mat.w > 0.5) { return vec4f(i.col, 1.0); }   // unlit (debug samples)
+  let m = debugMode();
+  if (m == 1) { return vec4f(normalize(i.n) * 0.5 + 0.5, 1.0); }
+  if (m == 2) { return vec4f(pow(i.col, vec3f(1.0 / 2.2)), 1.0); }
   let c = shade(i.col, normalize(i.n), i.wp, O.mat.x, O.mat.y);
   return vec4f(toScreen(c), 1.0);
 }
@@ -148,9 +161,14 @@ struct VOut {
  * Sphere-traces an 8-bit SDF volume inside its proxy box (back faces), like Claybook's
  * FRenderPrimarySDFCS. The fragment writes frag_depth so it composites with the meshes and
  * the same code renders into the shadow map (orthographic rays).
+ *
+ * `fluid`: the loose-particle surface (src/gpu/fluid.js) instead. Its distance is metric (rgba16float .r),
+ * the box is a unit cube scaled to the region in use, and the region is the corner prm.yzw texels wide
+ * of a larger texture. size.w = 1 tints it (debug).
  */
-export const volumeWGSL = /* wgsl */ `
+export const volumeWGSL = (fluid) => /* wgsl */ `
 ${common}
+const FLUID = ${fluid ? 'true' : 'false'};
 struct Vol { model : mat4x4f, inv : mat4x4f, size : vec4f, prm : vec4f };  // size.w = band, prm.x = cell
 @group(1) @binding(0) var<uniform> U : Vol;
 @group(1) @binding(1) var sdfTex : texture_3d<f32>;
@@ -164,16 +182,28 @@ struct VOut {
 
 @vertex fn vs(@location(0) p : vec3f) -> VOut {
   var o : VOut;
-  o.pos = F.viewProj * (U.model * vec4f(p, 1.0));
-  o.lp = p;
+  var lp = p;
+  if (FLUID) { lp = p * U.size.xyz; }
+  o.pos = F.viewProj * (U.model * vec4f(lp, 1.0));
+  o.lp = lp;
   return o;
 }
 
+// texture coordinate of a local point (fluid: clamped inside the region, the texels past it are stale)
+fn uvw(p : vec3f) -> vec3f {
+  if (FLUID) {
+    let c = U.prm.x;
+    return clamp(p, vec3f(0.5 * c), U.size.xyz - 0.5 * c) / (c * U.prm.yzw);
+  }
+  return p / U.size.xyz;
+}
+
 fn map(p : vec3f) -> f32 {
+  if (FLUID) { return textureSampleLevel(sdfTex, samp, uvw(p), 0.0).r; }
   return (textureSampleLevel(sdfTex, samp, p / U.size.xyz, 0.0).r * 2.0 - 1.0) * U.size.w;
 }
 
-struct Hit { ok : bool, p : vec3f };
+struct Hit { ok : bool, p : vec3f, steps : i32 };
 
 fn march(lp : vec3f) -> Hit {
   var ro : vec3f;
@@ -198,6 +228,7 @@ fn march(lp : vec3f) -> Hit {
   let cell = U.prm.x;
   var t = tn;
   for (var i = 0; i < 220; i++) {
+    h.steps = i;
     let d = map(ro + rd * t);
     if (d < cell * 0.05) { h.ok = true; break; }
     t += max(d * 0.85, cell * 0.06);
@@ -243,7 +274,7 @@ struct FOut { @location(0) color : vec4f, @builtin(frag_depth) depth : f32 };
   ao = clamp(1.0 - 0.2 * ao, 0.3, 1.0);
   let sh = shadowAt(wp, nW);
 
-  let col = textureSampleLevel(colTex, samp, p / U.size.xyz, 0.0);
+  let col = textureSampleLevel(colTex, samp, uvw(p), 0.0);
   var alb = col.rgb * (0.92 + 0.14 * (noise3(p * 700.0) * 0.6 + noise3(p * 2100.0) * 0.4));
   // specks: alpha sets size and density (vanilla bean dots ... mint chocolate chips)
   let a = col.a;
@@ -252,6 +283,14 @@ struct FOut { @location(0) color : vec4f, @builtin(frag_depth) depth : f32 };
   var speck = 0.0;
   if (a > 0.02) { speck = smoothstep(th, th + 0.03, sn); }
   alb = mix(alb, vec3f(0.08, 0.04, 0.02) * (0.6 + 0.8 * alb), speck);
+  if (FLUID && U.size.w > 0.5) { alb = mix(alb, vec3f(0.1, 0.45, 1.0), 0.6); }
+
+  var o : FOut;
+  o.depth = depthOf(p);
+  let m = debugMode();
+  if (m == 1) { o.color = vec4f(nW * 0.5 + 0.5, 1.0); return o; }
+  if (m == 2) { o.color = vec4f(pow(alb, vec3f(1.0 / 2.2)), 1.0); return o; }
+  if (m == 3) { o.color = vec4f(heat(f32(h.steps) / 80.0), 1.0); return o; }
 
   let diff = clamp((dot(nW, L) + 0.35) / 1.35, 0.0, 1.0);
   let H = normalize(L + V);
@@ -261,9 +300,7 @@ struct FOut { @location(0) color : vec4f, @builtin(frag_depth) depth : f32 };
   var c = alb * (hemi * ao + SUN * diff * sh * 0.8) + alb * back * 0.3 + vec3f(spec);
   c += alb * pow(1.0 - max(dot(nW, V), 0.0), 3.0) * 0.1;
 
-  var o : FOut;
   o.color = vec4f(toScreen(c), 1.0);
-  o.depth = depthOf(p);
   return o;
 }
 

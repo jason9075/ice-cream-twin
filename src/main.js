@@ -2,7 +2,7 @@
 // (`icecream web`); this page draws what it streams and sends it commands (src/net/remote.js).
 import GUI from 'lil-gui';
 import { Vector3, Quaternion, mat4 } from './math.js';
-import { createRenderer } from './gpu/renderer.js';
+import { createRenderer, createFluidSurface } from './gpu/renderer.js';
 import { OrbitCamera } from './gpu/camera.js';
 import * as geo from './gpu/geometry.js';
 import { Panel } from './ui/panel.js';
@@ -95,6 +95,8 @@ async function main() {
 
   const particles = r.createInstances(sphereMesh, S.particleCap);
   const spilled = r.createInstances(sphereMesh, 8000);
+  // loose particles as one smooth surface (the balls themselves are a debug view)
+  const fluid = createFluidSurface(r, particles);
 
   let armView = null;
   try {
@@ -110,27 +112,38 @@ async function main() {
     instances: [particles, spilled],
     overlays: [],
     volumes,
-    shadowCasters: { objects: [...bowls, spoon, ...armObjects], instances: [particles, spilled], volumes },
+    fluids: [fluid],
+    shadowCasters: { objects: [...bowls, spoon, ...armObjects], instances: [particles, spilled], volumes, fluids: [fluid] },
+    debug: 0,
+    shadows: true,
   };
   const light = { dir: new Vector3(0.45, 1.0, 0.35).normalize(), center: new Vector3(0, 0.08, -0.08), extent: 0.5 };
 
   // ------------------------------------------------------------------ frames from the server
   const radius = () => sim.params.fluid.particleRadius * 1.15;
+  /** Fills the instance buffer; returns the bounds [lo, hi] of the n particles. */
   function writeInstances(inst, list) {
     const d = inst.data;
     const n = Math.min(list.n, inst.cap);
     const rad = radius();
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
     for (let k = 0; k < n; k++) {
       const o = k * 16;
-      d[k * 8] = list.data.getFloat32(o, true);
-      d[k * 8 + 1] = list.data.getFloat32(o + 4, true);
-      d[k * 8 + 2] = list.data.getFloat32(o + 8, true);
+      for (let a = 0; a < 3; a++) {
+        const v = list.data.getFloat32(o + a * 4, true);
+        d[k * 8 + a] = v;
+        if (v < lo[a]) lo[a] = v;
+        if (v > hi[a]) hi[a] = v;
+      }
       d[k * 8 + 3] = rad;
       d[k * 8 + 4] = list.data.getUint8(o + 12) / 255;
       d[k * 8 + 5] = list.data.getUint8(o + 13) / 255;
       d[k * 8 + 6] = list.data.getUint8(o + 14) / 255;
+      d[k * 8 + 7] = list.data.getUint8(o + 15) / 255;
     }
     inst.upload(n);
+    return [lo, hi];
   }
   let latest = null;
   remote.onFrame = (f) => {
@@ -307,14 +320,113 @@ async function main() {
     };
     armFolder = a;
 
-    const v = gui.addFolder('View');
-    const view = { ghost: true, particles: false };
-    particles.visible = view.particles;
-    v.add(view, 'ghost').name('target ghost').onChange((x) => (ghost.visible = x));
-    v.add(view, 'particles').onChange((x) => (particles.visible = x));
-    v.add({ reset: () => actions.reset() }, 'reset').name('Reset everything');
+  }
+
+  // ------------------------------------------------------------------ View panel (rendering + debug)
+  const view = {
+    particles: 'surface', // surface | balls | both | hidden
+    surfaceRadius: 1.3, // × particle radius
+    surfaceKernel: 3.0, // × particle radius
+    surfaceVoxel: 0.8, // × particle radius
+    tintFluid: false,
+    crumbs: true,
+    bowlIce: true,
+    spoonIce: true,
+    bowls: true,
+    spoon: true,
+    arm: true,
+    table: true,
+    ghost: true,
+    shadows: true,
+    shading: 'shaded',
+    gridBoxes: false,
+  };
+  const SHADING = { shaded: 0, normals: 1, 'albedo (unlit)': 2, 'march steps': 3 };
+  const fluidInfo = { status: '' };
+
+  function updateFluid(n, lo, hi) {
+    const pr = sim.params.fluid.particleRadius;
+    fluid.update(n, lo, hi, { r: view.surfaceRadius * pr, R: view.surfaceKernel * pr, voxel: view.surfaceVoxel * pr, tint: view.tintFluid });
+    const i = fluid.info;
+    fluidInfo.status = n ? `${n} particles, ${i.dims.join('×')} @ ${(i.cell * 1000).toFixed(2)} mm` : 'no loose particles';
+  }
+  function applyView() {
+    const m = view.particles;
+    particles.visible = m === 'balls' || m === 'both';
+    fluid.vol.visible = m === 'surface' || m === 'both';
+    spilled.visible = view.crumbs;
+    bowlVols.forEach((x) => (x.visible = view.bowlIce));
+    contentVol.visible = view.spoonIce;
+    bowls.forEach((x) => (x.visible = view.bowls));
+    spoon.visible = view.spoon;
+    armObjects.forEach((x) => (x.visible = view.arm));
+    table.visible = view.table;
+    ghost.visible = view.ghost;
+    scene.shadows = view.shadows;
+    scene.debug = SHADING[view.shading];
+    gridBoxes.forEach((b) => (b.visible = view.gridBoxes));
+    // re-fit with the new surface settings even while paused
+    if (latest) {
+      const [lo, hi] = writeInstances(particles, latest.particles);
+      updateFluid(latest.particles.n, lo, hi);
+    }
+  }
+
+  // translucent boxes showing what each SDF grid (and the fluid surface's grid) covers
+  const unitCube = r.createMesh(geo.box([0, 0, 0], [1, 1, 1]));
+  const boxColors = [[1, 0.6, 0.2], [1, 0.6, 0.2], [1, 0.6, 0.2], [0.3, 0.9, 0.3], [0.2, 0.5, 1]];
+  const gridBoxes = boxColors.map((color) => r.createObject(unitCube, { color, rough: 1, opacity: 0.15 }));
+  scene.ghosts.push(...gridBoxes);
+  function syncBoxes() {
+    if (!view.gridBoxes) return;
+    const f = latest;
+    gridMeta.forEach((g, k) => {
+      const box = mat4.multiply(mat4.translation(g.ox, g.oy, g.oz), scale(g.sx, g.sy, g.sz));
+      if (k < 3) gridBoxes[k].setModel(box);
+      else if (f) {
+        const sm = mat4.compose(new Vector3(f.spoon[0], f.spoon[1], f.spoon[2]), new Quaternion(f.spoon[3], f.spoon[4], f.spoon[5], f.spoon[6]));
+        gridBoxes[3].setModel(mat4.multiply(sm, box));
+      }
+    });
+    const fb = fluid.box;
+    gridBoxes[4].visible = !!fb;
+    if (fb) gridBoxes[4].setModel(mat4.multiply(mat4.translation(...fb.origin), scale(...fb.size)));
+  }
+  function scale(x, y, z) {
+    const m = mat4.identity();
+    m[0] = x;
+    m[5] = y;
+    m[10] = z;
+    return m;
+  }
+
+  function viewFolder(v) {
+    const on = () => applyView();
+    v.add(view, 'particles', ['surface', 'balls', 'both', 'hidden']).name('loose particles').onChange(on);
+    const sf = v.addFolder('Particle surface');
+    sf.add(view, 'surfaceRadius', 0.5, 3, 0.05).name('radius × r').onChange(on);
+    sf.add(view, 'surfaceKernel', 1.5, 6, 0.1).name('blend kernel × r').onChange(on);
+    sf.add(view, 'surfaceVoxel', 0.3, 2, 0.05).name('voxel × r').onChange(on);
+    sf.add(fluidInfo, 'status').name('grid').disable().listen();
+    const show = v.addFolder('Show');
+    show.add(view, 'crumbs').name('crumbs (spilled)').onChange(on);
+    show.add(view, 'bowlIce').name('ice cream in bowls').onChange(on);
+    show.add(view, 'spoonIce').name('ice cream on spoon').onChange(on);
+    show.add(view, 'bowls').onChange(on);
+    show.add(view, 'spoon').onChange(on);
+    show.add(view, 'arm').name('SO-101').onChange(on);
+    show.add(view, 'table').onChange(on);
+    show.add(view, 'ghost').name('target ghost').onChange(on);
+    show.add(view, 'shadows').onChange(on);
+    const dbg = v.addFolder('Debug');
+    dbg.add(view, 'shading', Object.keys(SHADING)).name('shading').onChange(on);
+    dbg.add(view, 'tintFluid').name('tint particle surface').onChange(on);
+    dbg.add(view, 'gridBoxes').name('grid bounds').onChange(on);
+    dbg.add({ reset: () => actions.reset() }, 'reset').name('Reset everything');
     v.close();
   }
+  viewFolder(gui.addFolder('View'));
+  applyView();
 
   // ------------------------------------------------------------------ loop
   let last = performance.now();
@@ -336,8 +448,10 @@ async function main() {
       // the ghost shows where the spoon is heading: the arm's goal (reachable), or the raw target
       ghost.setModel(mat4.compose(new Vector3(f.ghost[0], f.ghost[1], f.ghost[2]), new Quaternion(f.ghost[3], f.ghost[4], f.ghost[5], f.ghost[6])));
       contentVol.setModel(mat4.multiply(spoonModel, mat4.translation(c.ox, c.oy, c.oz)));
-      writeInstances(particles, f.particles);
+      const [lo, hi] = writeInstances(particles, f.particles);
+      updateFluid(f.particles.n, lo, hi);
     }
+    syncBoxes();
     r.render(scene, camera, light);
     uiTimer += dt;
     if (uiTimer > 0.1 && sim.getState()) {
@@ -353,11 +467,19 @@ async function main() {
     camera,
     renderer: r,
     remote,
-    /** Show or hide the loose particles (View panel). */
+    /** How loose particles are drawn: 'surface' | 'balls' | 'both' | 'hidden' (true = 'surface'). */
     showParticles(v = true) {
-      particles.visible = v;
-      gui.controllersRecursive().find((x) => x.property === 'particles')?.setValue(v);
+      const mode = v === true ? 'surface' : v === false ? 'hidden' : v;
+      gui.controllersRecursive().find((x) => x.property === 'particles')?.setValue(mode);
     },
+    /** Change View settings (same names as the panel's `view` object), e.g. {shading: 'normals'}. */
+    setView(patch) {
+      Object.assign(view, patch);
+      gui.controllersRecursive().forEach((x) => x.updateDisplay());
+      applyView();
+      return { ...view };
+    },
+    fluid,
     /** The SO-101's gripper_link world matrix (row-major), from the last frame. */
     linkMatrix(name) {
       const k = S.arm.links.indexOf(name);
