@@ -1,6 +1,6 @@
 //! The ice-cream simulation: three bowls of SDF ice cream, a spoon that scoops it into its own
 //! SDF, loose PBF particles that freeze back into solid ice, and a volume ledger that keeps
-//! the total mass constant. Mirrors `src/sim/sim.js`.
+//! the total mass constant. Ported from the JS version this project started with (removed; `tests/parity.rs` pins the port to frozen fixtures from it).
 
 use crate::fluid::{Collide, Fluid, CONTACT_NONE, CONTACT_SPOON, CONTACT_WORLD};
 use crate::grid::SdfGrid;
@@ -1265,6 +1265,18 @@ impl Sim {
     pub fn particle_volume(&self) -> f64 {
         let r = if self.fluid.r > 0.0 { self.fluid.r } else { self.params.fluid.particle_radius };
         8.0 * r * r * r
+    }
+
+    /// Take the spoon's current pose as the one eat / release work at (between frames).
+    pub fn sync_spoon(&mut self) {
+        self.sync_view();
+    }
+
+    /// Tip everything on the spoon off as particles now (the "Tip off" button), at the spoon's pose.
+    pub fn release(&mut self) {
+        self.sync_view();
+        self.release_content();
+        self.update_stats(false);
     }
 
     /// Turn everything on the spoon into particles (tilt release).

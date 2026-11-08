@@ -1,5 +1,5 @@
 //! Analytic signed distance functions for the static scene (bowls, table) and the spoon.
-//! Units: metres. Frame: Y up. Negative = inside. Mirrors `src/sim/sdf.js`.
+//! Units: metres. Frame: Y up. Negative = inside. Ported from the JS version this project started with (removed; `tests/parity.rs` pins the port to frozen fixtures from it).
 
 use crate::math::js_round;
 use std::sync::OnceLock;
@@ -61,6 +61,28 @@ pub fn bowls() -> &'static [Bowl; 3] {
         };
         [mk(0), mk(1), mk(2)]
     })
+}
+
+/// Lathe profile (radius, height) matching `sd_bowl`, for the render mesh: outside wall, rim, inside.
+pub fn bowl_profile(b: &Bowl, segs: usize) -> Vec<[f64; 2]> {
+    use std::f64::consts::PI;
+    let mut pts = Vec::new();
+    let alpha = b.h.atan2(b.w);
+    let (ro, ri) = (b.r + b.t, b.r - b.t);
+    for i in 0..=segs {
+        let a = -PI / 2.0 + (alpha + PI / 2.0) * (i as f64 / segs as f64);
+        pts.push([ro * a.cos(), b.cy + ro * a.sin()]);
+    }
+    for i in 1..16 {
+        let a = alpha + PI * (i as f64 / 16.0);
+        pts.push([b.w + b.t * a.cos(), b.cy + b.h + b.t * a.sin()]);
+    }
+    for i in 0..=segs {
+        let a = alpha - (alpha + PI / 2.0) * (i as f64 / segs as f64);
+        pts.push([(ri * a.cos()).max(0.0), b.cy + ri * a.sin()]);
+    }
+    pts[0][0] = 0.0;
+    pts
 }
 
 pub fn sd_bowl(b: &Bowl, x: f64, y: f64, z: f64) -> f64 {
