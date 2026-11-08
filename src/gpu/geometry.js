@@ -1,6 +1,5 @@
 // Mesh generation. Every mesh is { vertices: Float32Array [px,py,pz,nx,ny,nz]*, indices: Uint32Array }.
-// Shapes are built from the same parameters as the collision SDFs in sim/sdf.js.
-import { SPOON } from '../sim/sdf.js';
+// Shapes are built from the same parameters as the server's collision SDFs (scene in the hello message).
 
 class Builder {
   constructor() {
@@ -127,11 +126,14 @@ export function box(min, max) {
   return b.build();
 }
 
-/** Spoon: half-ellipsoid cup shell (outer, inner, rim) + polyline handle (cylinders + joints). */
-export function spoon() {
+/**
+ * Spoon: half-ellipsoid cup shell (outer, inner, rim) + polyline handle (cylinders + joints).
+ * `S` = {a, b, c, t, handleR, handle} (the server's scene.spoon).
+ */
+export function spoon(S) {
   const b = new Builder();
-  const { a, c, t } = SPOON;
-  const bb = SPOON.b;
+  const { a, c, t } = S;
+  const bb = S.b;
   const h = t / 2;
   const nTh = 22;
   const nPh = 72;
@@ -155,8 +157,8 @@ export function spoon() {
     ];
   }, true);
 
-  const R = SPOON.handleR;
-  const H = SPOON.handle;
+  const R = S.handleR;
+  const H = S.handle;
   for (let k = 0; k < H.length - 1; k++) {
     const p0 = H[k];
     const p1 = H[k + 1];

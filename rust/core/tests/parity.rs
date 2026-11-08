@@ -1,5 +1,7 @@
-//! Bit-for-bit comparison with the JS simulation. Regenerate the fixtures with
-//! `node tools/parity-fixture.mjs` after changing either implementation.
+//! Regression against frozen fixtures. They were written by the JS simulation this project started with
+//! (and its SO-101 arm), which the Rust core matched bit for bit; the JS is gone, the fixtures stay, so any
+//! change to the numerics shows up here. Behaviour changes on purpose: update the expectations, don't
+//! loosen the comparison.
 
 use icecream_core::math::{self, Quat, Vec3};
 use icecream_core::sdf::{bowls, FLAVORS};

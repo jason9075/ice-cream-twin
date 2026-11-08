@@ -1,5 +1,5 @@
 //! Position Based Fluids (Macklin & Müller 2013) on the CPU for the "loose" ice cream.
-//! Mirrors `src/sim/fluid.js` (f32 particle arrays like the JS typed arrays, f64 arithmetic).
+//! Ported from the former JS `fluid.js` (f32 particle arrays like its typed arrays, f64 arithmetic).
 //!
 //! predict -> hash-grid neighbours -> [density constraint (repulsive only) + cohesion
 //! -> collide with SDFs] x iterations -> velocity from positions -> friction -> XSPH viscosity

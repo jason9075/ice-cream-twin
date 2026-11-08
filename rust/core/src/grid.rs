@@ -1,5 +1,5 @@
 //! A narrow-band signed distance volume plus an RGBA colour volume (rgb = linear albedo,
-//! a = speck amount). Voxel centres sit at origin + (i + 0.5) * cell. Mirrors `src/sim/grid.js`
+//! a = speck amount). Voxel centres sit at origin + (i + 0.5) * cell. Ported from the former JS `grid.js`
 //! (distances stored as f32 like the JS `Float32Array`, arithmetic in f64).
 
 use crate::sdf::smin;

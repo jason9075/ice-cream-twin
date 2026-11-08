@@ -1,4 +1,4 @@
-//! Tunable parameters (same names and defaults as `src/sim/params.js`).
+//! Tunable parameters (the panel and the protocol use the same names in camelCase).
 
 #[derive(Clone, Debug)]
 pub struct FluidParams {

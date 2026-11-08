@@ -1,5 +1,4 @@
 import * as M from '../math.js';
-import { HOME_POS, HOME_QUAT } from '../sim/spoon.js';
 
 /** Jog axes: [label, key, kind, axis, sign] */
 const JOG = [
@@ -152,8 +151,7 @@ export class Panel {
   }
 
   home() {
-    if (this.actions.home) this.actions.home();
-    else this.sim.spoon.setTarget(HOME_POS, HOME_QUAT);
+    this.actions.home();
   }
 
   fillPose() {

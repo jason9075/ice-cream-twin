@@ -1,4 +1,4 @@
-# Justfile for Ice Cream Twin（WebGPU 挖冰淇淋數位孿生）
+# Justfile for Ice Cream Twin（挖冰淇淋數位孿生：Rust 後端跑模擬，網頁只負責畫面）
 
 set shell := ["bash", "-uc"]
 
@@ -6,76 +6,70 @@ set shell := ["bash", "-uc"]
 default:
     @just --list
 
-# 安裝專案相依套件
+# 安裝前端相依套件
 install:
     npm install
 
-# 啟動本機 Vite 開發伺服器 (http://localhost:5173，需要支援 WebGPU 的瀏覽器)
+# 開發：啟動 Rust 模擬伺服器（ws://localhost:8765/ws）+ Vite 前端（http://localhost:5173，/ws 代理到伺服器）
 dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd rust && cargo build --release -q -p icecream-cli)
+    ./rust/target/release/icecream web --port 8765 &
+    pid=$!
+    trap 'kill $pid' EXIT
     npm run dev
+
+# 只啟動 Rust 模擬伺服器（給外部控制器或另開的前端用）
+server port="8765":
+    cd rust && cargo run --release -q -p icecream-cli -- web --port {{port}}
 
 # 用開啟 WebGPU 的獨立 Chrome profile 開啟頁面（Linux 預設關閉 WebGPU；請先在另一個終端機跑 just dev）
 chrome url="http://localhost:5173/":
     google-chrome --user-data-dir="${XDG_CACHE_HOME:-$HOME/.cache}/ice-cream-sim-chrome" \
         --enable-unsafe-webgpu --enable-features=Vulkan --use-angle=vulkan "{{url}}" > /dev/null 2>&1 &
 
-# 執行單元測試（碰撞不穿模、挖取質量守恆、ROS 座標轉換；node，不需 GPU）
-test:
-    npm test
-
-# 建置生產環境打包成品 (dist/)
+# 建置前端 (dist/)
 build:
     npm run build
 
-# 預覽生產環境打包成品 (http://localhost:4173)
-preview: build
-    npx vite preview --port 4173
+# 單一程式提供整個應用：建置前端後由 Rust 伺服器同時送出頁面與模擬（http://localhost:8765）
+serve port="8765": build
+    cd rust && cargo run --release -q -p icecream-cli -- web --port {{port}} --dist ../dist
 
-# 無頭 Chrome（真 GPU）跑一次挖取並輸出截圖到 shots/
+# Rust 測試：碰撞不穿模、質量守恆、手臂、凍結對照資料回歸、WebSocket 伺服器端到端
+test:
+    cd rust && cargo test --release
+
+# 無頭 Chrome（真 GPU）連到 Rust 伺服器跑一次挖取，截圖輸出到 shots/
 screenshots: build
     #!/usr/bin/env bash
     set -euo pipefail
-    ./node_modules/.bin/vite preview --port 4173 --strictPort > /dev/null 2>&1 &
+    (cd rust && cargo build --release -q -p icecream-cli)
+    ./rust/target/release/icecream web --port 4173 --dist dist > /dev/null 2>&1 &
     pid=$!
     trap 'kill $pid' EXIT
     for _ in $(seq 50); do curl -sf http://localhost:4173/ > /dev/null && break; sleep 0.2; done
     node tools/shot.mjs http://localhost:4173/ shots
 
-# 無頭 Chrome（真 GPU）比對整個 GPU 模擬與 CPU 參考版：掃描、體積、平滑、雕刻、完整挖取（自帶 Vite dev server）
-gpu-sim-check *tests:
-    node tools/gpu-sim-check.mjs {{tests}}
+# WebSocket 範例控制器（ROS 座標）：連到 Rust 伺服器挖兩匙（請先 just dev 或 just server）
+ws-example url="ws://localhost:8765/ws":
+    uv run --with websockets tools/ws_example_client.py {{url}}
 
-# 啟動 WebSocket 範例控制器（ROS 座標；頁面按 Connect 或 sim.connect()）
-ws-example:
-    uv run --with websockets tools/ws_example_server.py
-
-# 重新下載並轉換 SO-101 手臂模型（TheRobotStudio/SO-ARM100，Apache-2.0）到 public/so101/，並產生 JS 與 Rust 的關節表
+# 重新下載並轉換 SO-101 手臂模型（TheRobotStudio/SO-ARM100，Apache-2.0）到 public/so101/，並產生 Rust 的關節表
 so101-assets:
     uv run --with trimesh --with pymeshlab --with numpy --with scipy --with networkx tools/so101_assets.py
 
-# 重新計算夾爪夾住湯匙柄的角度（結果寫在 src/robot/tool.js）
-so101-grip:
-    node tools/so101_grip.mjs
-
-# Rust 核心：單元測試 + 不穿模測試 + 手臂測試 + 與 JS 逐幀比對（bit-identical，含手臂）
-rust-test:
-    cd rust && cargo test --release
-
-# 重新產生 JS 對照資料再跑比對（改了 JS 或 Rust 模擬後執行）
-parity:
-    node tools/parity-fixture.mjs
-    cd rust && cargo test --release --test parity
-
 # Rust 效能測試（挖取 + 三次下挖 + 手臂挖取，印出 ms/frame 與質量）
-rust-bench:
+bench:
     cd rust && cargo run --release -q -p icecream-cli -- bench
 
-# 無頭數位孿生：stdin/stdout JSON lines（和 WebSocket 同一套訊息，含 SO-101 的 set_joints）
-rust-serve:
+# 無頭數位孿生：stdin/stdout JSON lines（和 WebSocket 同一套指令，給 ROS node 當子程序用）
+stdio:
     cd rust && cargo run --release -q -p icecream-cli -- serve
 
-# 執行完整驗證流程 (JS 測試 + Rust 測試 + 生產建置 + 截圖)
-verify: test rust-test build screenshots gpu-sim-check
+# 執行完整驗證流程 (Rust 測試 + 前端建置 + 截圖)
+verify: test build screenshots
     @echo "✅ 測試、建置與截圖全部完成！"
 
 # 清理建置產物

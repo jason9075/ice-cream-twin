@@ -1,4 +1,4 @@
-//! SO-101 kinematics from the official URDF (`urdf.rs`), port of `src/robot/so101.js`.
+//! SO-101 kinematics from the official URDF (`urdf.rs`), first written in JS (`src/robot/so101.js`, removed).
 //! Matrices are 4x4 row-major `[f64; 16]`: `m[r * 4 + c]`, in the robot's own Z-up frame.
 
 use super::urdf::SO101_JOINTS;

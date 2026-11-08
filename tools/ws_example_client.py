@@ -1,16 +1,17 @@
-"""Example external controller for the ice-cream digital twin.
+"""Example external controller for the ice-cream digital twin (as a ROS bridge node would be).
 
-The browser page is the WebSocket *client*; this script is the server (as a ROS bridge node
-would be). It scoops vanilla, lifts, "eats", then scoops mint, using ROS REP-103 coordinates
-(x forward, y left, z up, metres; quaternions [x, y, z, w]).
+The simulation runs in the Rust server (`icecream web`, started by `just dev`); this script connects to
+it like the browser does, asks for a state stream in ROS REP-103 coordinates (x forward, y left, z up,
+metres; quaternions [x, y, z, w]) and scoops vanilla, lifts, "eats", then scoops mint. Open the page
+alongside to watch it.
 
-    uv run --with websockets tools/ws_example_server.py
-    # then in the page: Parameters > Digital-twin bridge > Connect   (or sim.connect())
+    uv run --with websockets tools/ws_example_client.py [ws://localhost:8765/ws]
 """
 
 import asyncio
 import json
 import math
+import sys
 
 import websockets
 
@@ -52,19 +53,19 @@ def scoop(bowl):
     return [(p, spoon_quat(p[0], p[1], pitch), secs) for p, pitch, secs in steps]
 
 
-async def handler(ws):
+async def drive(ws):
     latest = {}
 
     async def reader():
         async for raw in ws:
             msg = json.loads(raw)
             if msg.get("type") == "hello":
-                print("twin connected, params:", list(msg["params"]))
+                print("twin says hello, parameter groups:", list(msg["params"]))
             elif msg.get("type") == "state":
                 latest.update(msg)
 
     task = asyncio.create_task(reader())
-    await ws.send(json.dumps({"type": "config", "frame": "ros", "rateHz": 20}))
+    await ws.send(json.dumps({"type": "config", "stream": "state", "frame": "ros", "rateHz": 20}))
 
     async def run(bowl):
         for pos, quat, secs in scoop(bowl):
@@ -89,9 +90,10 @@ async def handler(ws):
 
 
 async def main():
-    async with websockets.serve(handler, "localhost", 8765):
-        print("waiting for the twin on ws://localhost:8765 ...")
-        await asyncio.Future()
+    url = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:8765/ws"
+    async with websockets.connect(url) as ws:
+        print("connected to", url)
+        await drive(ws)
 
 
 if __name__ == "__main__":

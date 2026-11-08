@@ -1,5 +1,5 @@
 //! Coordinate frames: the scene is Y-up (three.js style); ROS REP-103 is x forward, y left,
-//! z up. Converting is a +90° rotation about X. Mirrors `frames` in `src/bridge.js`.
+//! z up. Converting is a +90° rotation about X. Used by the protocol's `frame: "ros"`.
 
 use crate::math::{Quat, Vec3};
 

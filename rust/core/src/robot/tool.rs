@@ -1,8 +1,8 @@
-//! End-of-arm tool modules: how the spoon is held by the SO-101. Port of `src/robot/tool.js`.
+//! End-of-arm tool modules: how the spoon is held by the SO-101.
 //!
 //! A module says where the spoon sits in the `gripper_link` frame and what happens to the gripper
 //! jaw. Today the stock gripper is clamped shut on the handle. The real arm will carry a different
-//! module (later a 3D-printed spoon holder): add an entry to [`tool`] (and to `tool.js`) with its
+//! module (later a 3D-printed spoon holder): add an entry to [`tool`] (and its name to [`TOOL_NAMES`]) with its
 //! own `spoon_in_gripper` and `jaw: None`.
 
 use super::so101::{m4, M4};
@@ -49,7 +49,8 @@ pub fn handle_grip(grip_x: f64, at: [f64; 3]) -> M4 {
 pub fn tool(name: &str) -> Option<Tool> {
     match name {
         // Stock SO-101 gripper clamped on the handle: the handle lies against the fixed jaw's fingertip
-        // pad (inner face at x = -7.9 mm), the jaw closed until it touches (tools/so101_grip.mjs).
+        // pad (inner face at x = -7.9 mm), the jaw closed until it touches (found by sweeping the jaw mesh
+        // against the handle; the sweep script went with the JS version).
         "so101-gripper-clamp" => Some(Tool {
             name: "so101-gripper-clamp",
             label: "SO-101 gripper, jaw clamped on the handle",

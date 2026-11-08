@@ -1,5 +1,5 @@
 //! The SO-101 holding the spoon: base placement, inverse kinematics, joint-space leading.
-//! Port of `src/robot/arm.js`, operation for operation (see `tests/parity.rs`).
+//! Ported operation for operation from the former JS `arm.js` (see `tests/parity.rs`).
 //!
 //! The spoon controller stays in charge of contact and the no-penetration guarantee. The arm wraps it:
 //! 1. [`Arm::constrain`] (before each step): a new spoon target becomes the arm's goal, the closest

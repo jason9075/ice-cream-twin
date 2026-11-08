@@ -6,4 +6,8 @@ export default defineConfig({
   build: {
     target: 'es2022',
   },
+  // the simulation runs in the Rust server (just dev starts it on 8765); the page talks to it at /ws
+  server: {
+    proxy: { '/ws': { target: 'ws://localhost:8765', ws: true } },
+  },
 });

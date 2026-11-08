@@ -1,5 +1,5 @@
 //! The spoon controller: follows a target pose like a speed-limited robot tool, but can never
-//! penetrate the bowls or the table. Mirrors `src/sim/spoon.js`.
+//! penetrate the bowls or the table. Ported from the former JS `spoon.js`.
 //!
 //!  1. Each frame the step toward the target is clamped to max linear / angular speed.
 //!  2. The step is split into sub-steps so no collision sample moves more than `SUBSTEP_MAX`

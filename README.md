@@ -1,29 +1,43 @@
 # Ice Cream Twin
 
-An interactive ice-cream scooping page, built as a digital-twin environment for a robot arm. Three bowls
-(vanilla, strawberry, mint chocolate chip) sit on a table, and an **SO-101 arm** behind them holds the spoon.
-The spoon can be driven by keys, the mouse, joint sliders or an external program (WebSocket, optionally in
-ROS coordinates). **The spoon never passes through a bowl or the
-table**, and **Eat** empties whatever is on the spoon.
+An interactive ice-cream scooping digital twin for a robot arm. Three bowls (vanilla, strawberry, mint
+chocolate chip) sit on a table, and an **SO-101 arm** behind them holds the spoon. The spoon can be driven by
+keys, the mouse, joint sliders or an external program (WebSocket, optionally in ROS coordinates). **The
+spoon never passes through a bowl or the table**, and **Eat** empties whatever is on the spoon.
 
-- Rendering: native **WebGPU** (hand-written WGSL, no three.js), SDF ray marching, shadow map, MSAA.
-- Simulation: plain JavaScript on the CPU (deterministic). The algorithm follows Claybook (notes in
-  `~/docs/study/claybook/`).
-- Dependencies: only `lil-gui` (parameter panel). `puppeteer-core` is used only by the headless tools in
-  `tools/`.
+**The simulation runs in a Rust server; the web page only draws it.**
+
+```
+ icecream web (Rust, rust/cli)                                     browser (src/)
+ ┌─────────────────────────────────────────────┐   /ws (binary)   ┌──────────────────────────────┐
+ │ simulation thread, 60 Hz: spoon, ice cream, │ ───────────────▶ │ WebGPU renderer: SDF ray     │
+ │ particles, SO-101 (rust/core)               │  frames: state,  │ marching, shadows, the arm   │
+ │   └ snapshot → per-client frame (patches)   │  poses, grid     │ meshes, particles            │
+ │ WebSocket + static files (--dist)           │  patches         │ panel, keys, mouse, window.sim│
+ └─────────────────────────────────────────────┘ ◀─────────────── └──────────────────────────────┘
+          ▲  same JSON commands                     JSON commands
+          └── controllers: ROS bridge, Python (tools/ws_example_client.py), `icecream serve` over stdio
+```
+
+- Simulation: Rust (`rust/core`), deterministic, ~6 ms/frame on one core. The algorithm follows Claybook
+  (notes in `~/docs/study/claybook/`).
+- Viewer: native **WebGPU** (hand-written WGSL, no three.js). Dependencies: only `lil-gui`;
+  `puppeteer-core` is used by the headless screenshot tool.
 
 ```bash
-just install
-just dev           # http://localhost:5173 (needs a WebGPU browser: Chrome / Edge 113+)
+just install       # npm install (the viewer)
+just dev           # Rust server on :8765 + Vite on http://localhost:5173 (proxies /ws to the server)
 just chrome        # Linux: Chrome ships with WebGPU off; opens a separate profile with the flags on
-just test          # unit tests: collision, scooping, mass conservation, frames, SO-101 IK (node, no GPU)
-just screenshots   # build, run a scripted scoop headless, write screenshots to shots/
+just serve         # the whole app from one binary: http://localhost:8765 (built page + simulation)
+just test          # Rust: collision, mass conservation, arm, fixture regression, WebSocket server end to end
+just screenshots   # build, run `icecream web --dist dist`, drive a scoop headless, write shots/
 just verify        # test + build + screenshots
 just               # list all recipes
 ```
 
-Pushing to `main` runs `.github/workflows/deploy.yml`: tests, build, deploy to GitHub Pages (set the repo's
-Settings → Pages → Source to **GitHub Actions**).
+The page used to simulate everything itself (first in JavaScript on the CPU, then as WebGPU compute shaders,
+see git history up to `eba6656`). The Rust core was a bit-for-bit port of that JavaScript and is now the
+only implementation. Next: run the GPU version (its WGSL) inside the server through wgpu.
 
 ### Browser support
 
@@ -55,49 +69,6 @@ Ice cream exists in two forms that convert into each other:
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
   shader renders into the shadow map.
 
-### Everything on the GPU (`src/gpu/sim/`)
-
-In the page the whole simulation lives on the GPU, as in Claybook: the four SDF volumes (distance +
-colour), the particles and the volume ledger sit in GPU buffers, and each frame is **one submission** of
-compute passes:
-
-> carve the bowls + copy ice into the scoop (once per spoon sub-step) → carry loose ice with the spoon →
-> tip-out → PBF sub-steps (hash grid, density, collision with every SDF) → freeze resting particles
-> (smooth-min stamps) → ledger (owed ice stamped back onto the heap, extra ice shaved off) →
-> volume-preserving smoothing and settling → redistancing the scoop → statistics → render textures and
-> particle instances
-
-The CPU keeps what is small and sequential: the spoon controller (it never penetrates the analytic bowls),
-the SO-101, and deciding which passes to run. It reads back one 1.5 kB block of statistics per frame,
-a frame late. The CPU version reads `contentVolume` at the same point, so nothing waits longer than it
-did on the CPU, except the cutting force, which lags by one frame.
-
-- **Same algorithm, in f32.** Where the CPU walks voxels or particles in order and keeps a running sum,
-  the GPU runs every element at once and an exclusive **prefix scan** over the same order tells each one
-  what the sum was when it was reached. That covers displaced ice turning into one crumb per particle
-  volume, the scoop's capture budget, freezing order and compaction. Owed ice from parallel kernels goes
-  into **fixed-point bins** (3×3×3 voxels, atomic adds). Sequential decisions (paying debts, searching for
-  a free ice top) run in one workgroup that evaluates candidates and stamps together.
-- **Deterministic.** The same run twice gives bit-identical grids and particle positions on a given GPU.
-  The atomics only add integers, neighbour lists and every other list come out of scans, and hash cells
-  are sorted by particle index.
-- **Checked against the CPU** (`just gpu-sim-check`, headless Chrome with a real GPU):
-
-  | check | result |
-  |---|---|
-  | prefix scans, volume reduction | exact (u32), 2·10⁻⁷ (f32) |
-  | volume-preserving smoothing + settling of 13,837 edited voxels | max difference 6·10⁻⁷ cell |
-  | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
-  | the CPU tests' scoop, carry, eat (510 frames) | 16.6 g scooped (CPU 18.1 g), mass drift 0.010 g |
-  | tip-out | scoop gone, 1,800 particles, all frozen back 4 s later, drift 0.04 g |
-  | three plunges + eat | 52.4 g eaten (CPU 53.3 g), drift 0.01 g |
-  | two identical runs | bit-identical |
-
-- **Speed** (RTX-class GPU): ~1 ms/frame on average over a scoop against ~5 ms on the CPU. Busy frames
-  take ~4 ms (2.5 ms of it GPU work). 15,000 loose particles take 4.2 ms/frame.
-- The CPU simulation (`src/sim/`) stays the reference: node tests and the Rust port follow it bit for
-  bit. Run it in the page with `?sim=cpu` or the *simulation* switch at the top of the panel.
-
 ### Mass conservation
 
 Every transfer is measured in voxel occupancy, and anything that can't be placed at once goes into a
@@ -111,10 +82,10 @@ Every transfer is measured in voxel occupancy, and anything that can't be placed
 Each frame, owed ice is stamped onto the lowest free ice surface near where it went missing, clear of the
 spoon, so displaced ice heaps up around the spoon. Stamps that add too much become credit and are shaved off
 the highest clear peak. Plunging straight to the bottom of a bowl three times conserves the total
-(bowls + spoon + particles + eaten + spilled) to within 0.1 g of 2075 g (`tests/sim.test.js`). Everything
+(bowls + spoon + particles + eaten + spilled) to within 0.1 g of 2075 g (`rust/core/tests/sim.rs`). Everything
 counted as "spilled" is a visible crumb on the table.
 
-## Spoon control and the no-penetration guarantee (`src/sim/spoon.js`)
+## Spoon control and the no-penetration guarantee (`rust/core/src/spoon.rs`)
 
 The spoon behaves like a speed-limited robot tool tracking a target pose (the translucent blue ghost):
 
@@ -128,32 +99,33 @@ The spoon behaves like a speed-limited robot tool tracking a target pose (the tr
    last valid pose and reports `blocked`. Collision samples are 0.2 mm fatter than the mesh, so no
    interpenetration is ever visible.
 
-Tested in `tests/collision.test.js`: 120 random target poses (up to 0.6 m/s and 400°/s), and ramming the
+Tested in `rust/core/tests/collision.rs`: 120 random target poses (up to 0.6 m/s and 400°/s), and ramming the
 bowl wall at 3 m/s from five directions, checking every frame that no sample crosses the wall.
 
-## Robot arm: SO-101 (`src/robot/`)
+## Robot arm: SO-101 (`rust/core/src/robot/`)
 
 The arm is the official SO-101 model from
 [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) (`so101_new_calib.urdf`, Apache-2.0).
 `just so101-assets` downloads it at a pinned commit, decimates the meshes to 1.6 MB
-(`public/so101/`, licence included) and generates the kinematic chain (`src/robot/so101-urdf.js`, and the same
-table for Rust in `rust/core/src/robot/urdf.rs`).
+(`public/so101/`, licence included; the page draws them, `src/robot/render.js`) and generates the kinematic
+chain (`rust/core/src/robot/urdf.rs`).
 
 - **Placement**: the base stands on the table behind the middle bowl at (0, 0, −0.28) m, facing the
   bowls. In ROS coordinates that is (0, 0.28, 0).
-- **Tool module** (`src/robot/tool.js`): how the spoon is held. Right now the stock gripper's jaw is
+- **Tool module** (`rust/core/src/robot/tool.rs`): how the spoon is held. Right now the stock gripper's jaw is
   **locked shut on the spoon handle** at −0.119 rad (−6.8°). The handle lies along the fingers against the
   fixed jaw's fingertip pad, 10 cm from the handle's end, with the cup opening toward the moving jaw.
-  `just so101-grip` recomputes the jaw angle from the meshes. The real arm will carry a different module
-  (later a 3D-printed spoon holder). Swapping it in means adding one entry to `TOOLS`: the spoon's pose in
-  `gripper_link`, `jaw: null`, `hideJaw: true` and its meshes. Nothing else depends on the gripper.
+  The angle is where the jaw mesh first touches the 6.4 mm handle. The real arm will carry a different
+  module (later a 3D-printed spoon holder). Swapping it in means adding one entry to `tool()`: the spoon's
+  pose in `gripper_link`, `jaw: None`, `hide_jaw: true` (and its meshes for the viewer). Nothing else
+  depends on the gripper.
 - **Inverse kinematics**: damped least squares on the spoon's 6-D pose with joint limits (active set).
   The SO-101 has 5 joints, so some spoon poses can't be reached. In practice the handle has to point
   roughly at the arm. In exchange, the scooping curl (wrist flex) and the sideways tilt (wrist roll) are
   both native.
 - **How it drives the spoon**: the spoon controller still owns contact and the no-penetration guarantee.
   The arm wraps it:
-  1. Any new target (mouse, jog keys, Go to pose, bridge) becomes the arm's **goal**. This is the
+  1. Any new target (mouse, jog keys, Go to pose, a controller) becomes the arm's **goal**. This is the
      closest pose the arm can reach, and it is what the blue ghost shows.
   2. The spoon is led to the goal **in joint space** (90°/s by default). The command waits while the
      spoon is held back by ice. This way the spoon only moves through poses the arm can hold. A straight
@@ -173,8 +145,9 @@ table for Rust in `rust/core/src/robot/urdf.rs`).
 
 The side panel adjusts everything live: fluid (particle radius, viscosity, cohesion, friction, damping,
 gravity, iterations…), freezing, ice cream (hardness in kPa, accretion, capacity, slide-off angle, surface
-smoothing, density, refill shape) and the spoon controller (max speeds, max cutting force). Under **View**
-you can show the target ghost, the collision samples and the loose particles (hidden by default).
+smoothing, density, refill shape) and the spoon controller (max speeds, max cutting force); every change
+goes to the server (`set_params`). Under **View** you can show the target ghost and the loose particles
+(hidden by default).
 
 ## Digital-twin interface
 
@@ -182,118 +155,90 @@ Coordinates default to the scene's Y-up frame in metres. Pass `frame: "ros"` for
 y left, z up). The spoon pose's origin is the **centre of the cup's rim**; +X points toward the handle and
 +Y is the direction the cup opens.
 
-**JS API** (`window.sim`):
+### The server (`icecream web`, `rust/cli/src/web.rs`)
+
+`GET /ws` is a WebSocket; everything else is the built page when started with `--dist`. On connect the
+server sends `hello` (the scene: grids, bowls, spoon shape, flavours, arm links; and the parameters). Then:
+
+- **Commands** (JSON text, `rust/cli/src/protocol.rs`): `set_target {position?, quaternion?, frame?}`,
+  `set_joints {joints, unit: "rad"|"deg"}`, `home`, `eat` → `eaten {grams}`, `release`, `reset`, `refill`,
+  `arm {enabled?, constrainTarget?, jointSpeed?}`, `set_params {params}` / `get_params` → `params`,
+  `get_state` → `state`, `pause {paused}`, `step {frames}` → `state` (with `seq`). A request's `id` comes back
+  in its reply.
+- **Streams**, chosen with `config {stream, frame, rateHz}`:
+  - `"state"`: `state` JSON at `rateHz` (controllers);
+  - `"render"`: one binary frame per simulation frame (the page). A frame has the state, the spoon and
+    ghost poses, the 8 SO-101 link matrices, the loose particles, the crumbs when they change, and **grid
+    patches**: for each SDF volume, the bounding box of what changed since *that client's* last frame,
+    already quantised like the textures (r8 distance, rgba8 colour). A slow client skips frames, never
+    patches. A scoop streams ~100 kB/frame (6 MB/s at 60 fps); the first frame carries every grid (3.3 MB).
+
+`state` holds the actual and target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams,
+grams left per bowl, particles, and `arm` (joints in rad and deg, goal pose, goalUnreachableMm/Deg,
+trackingErrorMm/Deg, base).
+
+Example controller: `just ws-example` (`tools/ws_example_client.py`) connects like the page does, asks for
+a ROS-frame state stream and scoops vanilla → eats → scoops mint → eats, with the handle pointed at the arm,
+then parks the arm with a `set_joints`. Open the page alongside to watch.
+
+**`icecream serve`** (`just stdio`) takes the same commands as JSON lines on stdin and answers on stdout, for
+a ROS node or a script that runs the twin as a subprocess (no real-time loop: it advances on `step`).
+
+### In the page (`window.sim`)
 
 ```js
 sim.setTarget({ position: [x, y, z], quaternion: [x, y, z, w], frame: 'ros' });
 sim.setJoints({ joints: [0, -90, 50, 70, 0], unit: 'deg' });  // SO-101: pan, lift, elbow, wrist flex, wrist roll
-sim.getState('ros');   // actual / target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams, grams left per bowl,
-                       // particles, simulation ('gpu' | 'cpu'), gpuMs…
-                       // + arm: joints (rad), jointsDeg, goal pose, goalUnreachableMm/Deg, trackingErrorMm…
-await sim.eat();       // grams eaten (a Promise: the GPU simulation reads it back)
-sim.release(); sim.reset(); sim.refill();
-sim.setParams({ fluid: { viscosity: 0.5 }, ice: { hardness: 40 } });
-sim.pause(true); await sim.stepFrames(120);  // run outside the real-time loop (a Promise of the state)
-sim.setSimulation('cpu');                   // reload on the CPU reference simulation ('gpu' = compute shaders)
-sim.connect('ws://localhost:8765', 'ros');
-window.__view.capturePNG(1280, 800);      // offscreen render of one frame (virtual camera)
+sim.getState();                 // the latest streamed state (Y-up); sim.getState('ros') is a Promise of a fresh one
+await sim.eat();                // grams eaten
+sim.release(); sim.reset(); sim.refill(); sim.home();
+await sim.setParams({ fluid: { viscosity: 0.5 }, ice: { hardness: 40 } });
+await sim.arm({ enabled: false });
+await sim.pause(true); await sim.stepFrames(120);  // step the server; resolves once the page has drawn it
+window.__view.capturePNG(1280, 800);               // offscreen render of one frame (virtual camera)
 ```
 
-**WebSocket**: the page is the client; the external controller (e.g. a ROS bridge node) is the server.
-
-- Incoming: `set_target`, `set_joints {joints, unit: "rad"|"deg"}`, `eat`, `release`, `reset`, `refill`, `set_params`, `get_state`, `config {frame, rateHz}`
-- Outgoing: `hello` (with the parameters) on connect, then `state` at `rateHz`
-
-Example: `just ws-example` (or `uv run --with websockets tools/ws_example_server.py`), then press Connect
-on the page (or call `sim.connect()`). Using ROS coordinates, it scoops vanilla → eats → scoops mint → eats,
-with the handle pointed at the arm, then parks the arm with a `set_joints`.
-
-## Rust core (`rust/`)
-
-The simulation is also available as a Rust library, `icecream-core`, plus a headless CLI. This is the base
-for a native digital-twin app: direct ROS 2, batch and parallel runs, no browser.
-
-- `core/` is a port of `src/sim/*.js`, `src/robot/*.js` and `src/math.js`: the spoon controller, the SDF
-  grids, the PBF particles, scooping, the volume ledger, the frames and the SO-101 (kinematics, tool
-  modules, IK, joint-space leading). `Twin` steps the arm and the sim together like the page does
-  (`arm.constrain` → `sim.step` → `arm.follow`). The WebGPU renderer stays in JS for now.
-- **Bit-for-bit parity with the JS version.** A scripted scoop (510 frames) and two plunge-and-eat cycles
-  (900 frames) produce identical spoon poses, ice volumes, particle counts and ledger values in both. So
-  does an arm-driven run (830 frames: a scoop, a joint command, a move to the next bowl), down to every
-  joint angle, joint command and IK error. To get
-  there, the Rust code:
-  - stores f32 wherever JS uses a `Float32Array` and does the arithmetic in f64;
-  - copies V8's `Math.hypot` algorithm;
-  - ports V8's fdlibm `sin`, `cos` and `cbrt` (`v8math.rs`; the `libm` crate differs in the last bit for
-    about 1% of inputs);
-  - uses the same RNG and hash wrapping.
-- The fixtures are written by `node tools/parity-fixture.mjs` and checked by `cargo test`. CI regenerates
-  them with Node 22 (V8 12.4) and fails if they no longer match.
-- The collision tests (no penetration, no tunnelling, sliding along the wall), the mass-conservation tests
-  and the arm tests are ported too.
+### Tests
 
 ```bash
-just rust-test     # 20 tests: collision, mass, arm, parity with JS
-just parity        # regenerate the JS fixtures, then compare
-just rust-bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame
-just rust-serve    # headless twin over stdin/stdout
+just test     # cargo test: collision, mass, arm, fixture regression, the WebSocket server end to end
+just bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame
 ```
 
-**`icecream serve`** speaks the WebSocket bridge's messages as JSON lines (one object per line), so a ROS node
-or a Python script can run it as a subprocess. The SO-101 holds the spoon by default, as on the page:
-`set_target` goes to the closest pose the arm can reach, `set_joints` commands the joints, and every state
-carries the `arm` block. `{"type":"config","arm":false}` frees the spoon.
-
-```text
--> {"type":"config","frame":"ros"}
--> {"type":"set_target","position":[-0.18,0,0.085],"quaternion":[0,0,0,1]}
--> {"type":"step","frames":200}
-<- {"type":"state","spoon":{...},"scoopedGrams":11.7,"bowlGrams":{...},"blocked":false,...}
--> {"type":"eat"}
--> {"type":"set_joints","joints":[0,-90,50,70,0],"unit":"deg"}
--> {"type":"step","frames":120}
-<- {"type":"state",...,"arm":{"jointsDeg":[0.0,-90.0,50.0,70.0,0.0],"trackingErrorMm":3e-6,...}}
-```
+`rust/core/tests/parity.rs` replays scripted runs (a scoop, plunge-and-eat cycles, an arm-driven run) against
+fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit port. The JavaScript is gone;
+the fixtures stay as a regression net: any change to the numerics shows up there. (To match it the core
+keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
+`v8math.rs`, and the same RNG.) `rust/cli/tests/web.rs` starts a real server and checks the hello, the full
+first frame, that a scoop sends only patches of the bowl it touched, `step` / `eat` replies, and a ROS-frame
+state stream.
 
 ## Files
 
 ```
-src/math.js            vectors / quaternions / matrices (WebGPU 0..1 depth)
-src/sim/sdf.js         analytic SDFs for the bowls, spoon and table; the three flavours
-src/sim/grid.js        narrow-band SDF volume + colour, smooth-min stamping, volume-preserving smoothing
-src/sim/spoon.js       spoon controller (substeps, rigid contact projection, blocked)
-src/sim/fluid.js       PBF particles
-src/sim/sim.js         scoop / copy / freeze / tip / Eat, volume ledger, stats (the CPU reference)
-src/gpu/sim/           the same simulation resident on the GPU (default in the page):
-  layout.js              buffer map, shared WGSL (grids, SDFs, reductions, ledger primitives)
-  k-world.js             carving, copying into the scoop, crumbs, carrying, tip-out, eating, compaction
-  k-fluid.js             PBF particles
-  k-freeze.js            freezing particles back into the SDFs
-  k-ledger.js            owed ice: bins -> debts -> stamps, credit, residuals
-  k-grid.js              scans, volumes, smoothing / settling, redistancing, render textures
-  gpu-sim.js             the frame: which passes, in what order; statistics read-back
+rust/core/             the simulation (lib icecream_core): spoon controller, SDF grids, PBF particles,
+                       scooping, volume ledger, SO-101 kinematics / IK / tool modules; tests + fixtures
+rust/cli/              `icecream`: web (WebSocket server + static files), serve (stdio JSON lines), bench
+  src/protocol.rs        the JSON commands, state, parameters, scene
+  src/web.rs             simulation thread, snapshots, per-client binary frames with grid patches
+src/main.js            the viewer: builds the scene from `hello`, draws frames, panel, window.sim
+src/net/remote.js      WebSocket client, frame decoding, the spoon / params the panel uses
 src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
-src/robot/so101.js     SO-101 forward kinematics (chain generated from the URDF in so101-urdf.js)
-src/robot/arm.js       placement, IK, goal projection, joint-space leading of the spoon
-src/robot/tool.js      end-of-arm tool modules (today: gripper clamped on the handle)
-src/robot/render.js    loads public/so101/ and poses the link meshes
+src/robot/render.js    loads public/so101/ and poses the link meshes from the streamed matrices
+src/ui/panel.js        control panel (jog, go to pose, readouts)
 public/so101/          decimated SO-101 meshes + licence (tools/so101_assets.py)
-src/ui/panel.js        control panel
-src/bridge.js          window.sim and the WebSocket bridge
-tools/                 headless screenshots, GPU-vs-CPU checks (gpu-sim-check.mjs + gpu-sim-tests.js),
-                       WebSocket example controller, parity fixtures, SO-101 asset conversion
-                       (so101_assets.py) and jaw-angle sweep (so101_grip.mjs)
-rust/core/             Rust port of the simulation and the arm (lib icecream_core) + tests and JS fixtures
-rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
+tools/                 headless screenshots (shot.mjs), WebSocket example controller, SO-101 asset conversion
 ```
 
 ## Known limitations
 
-- The GPU simulation agrees with the CPU closely but not bit for bit (f32, a one-frame lag in the cutting
-  force, a few voxels that sit exactly on a test boundary), so a long run drifts apart from the CPU one
-  while staying physically the same. The Rust core runs the CPU reference only. The WGSL could run there
-  through wgpu, and would be checked with tolerances like `tools/gpu-sim-tests.js` does.
-- Particles are capped at 5000 by default (*max particles*, up to 15,000 on both).
+- The simulation runs on the server's CPU (one core, ~6 ms/frame); particles are capped at 5000 by default
+  (*max particles*, up to 15,000). The GPU version written for the page (WGSL compute shaders, git history)
+  is the next step, inside the server through wgpu.
+- The render stream is uncompressed: ~6 MB/s while scooping, fine on localhost, heavy over a network.
+  The scoop's grid changes nearly every frame while it settles; compressing patches (or sending the colour
+  only when it changes) would cut most of it.
+- One simulation per server, shared by every connected page and controller.
 - Only the spoon is collision-checked. The arm's links aren't, so a deep scoop near the arm can push the
   wrist through a bowl rim.
 - Joint angles follow the URDF convention (radians, zero at the URDF's zero pose). `so101_new_calib` is meant
