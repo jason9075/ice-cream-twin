@@ -1291,7 +1291,8 @@ impl Sim {
         self.update_stats(false);
     }
 
-    /// Turn everything on the spoon into particles (tilt release).
+    /// Turn everything on the spoon into particles (tilt release). Lattice points hugging the cup are
+    /// moved inside it first (see `into_cup`).
     fn release_content(&mut self) {
         if self.content_volume <= 0.0 {
             return;
@@ -1313,7 +1314,8 @@ impl Sim {
                     if self.fluid.n >= fp.max_particles {
                         break;
                     }
-                    let w = self.pose.to_world(lx, ly, lz);
+                    let [px, py, pz] = into_cup(lx, ly, lz, fp.particle_radius);
+                    let w = self.pose.to_world(px, py, pz);
                     let v = point_velocity(self.cur.pos, self.cur.lin, self.cur.ang, w[0], w[1], w[2]);
                     let mut col = [0u8; 4];
                     if let Some(vi) = self.content.voxel_at(lx, ly, lz) {
@@ -1536,4 +1538,21 @@ impl Collide for Env<'_> {
             }
         }
     }
+}
+
+/// A particle spawned from the scoop where it touches the cup (spoon-local point, within a particle
+/// radius of the metal, below the rim) goes to the inside of the cup, a radius clear of the wall.
+/// Otherwise its push-out can pick the cup's outside (the wall is thinner than a particle) and it falls
+/// through the spoon.
+pub fn into_cup(x: f64, y: f64, z: f64, r: f64) -> [f64; 3] {
+    if y >= 0.0 || sd_spoon_solid(x, y, z) >= r {
+        return [x, y, z];
+    }
+    let d = sd_hull_interior(x, y, z);
+    if d <= -r {
+        return [x, y, z];
+    }
+    let g = grad_local(sd_hull_interior, x, y, z);
+    let k = d + r;
+    [x - k * g[0], y - k * g[1], z - k * g[2]]
 }

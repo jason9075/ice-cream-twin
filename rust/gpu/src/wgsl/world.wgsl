@@ -299,6 +299,24 @@ fn releaseMark(@builtin(global_invocation_id) id: vec3u) {
   if (r >= u32(P.i0.x * P.i0.y * P.i0.z)) { return; }
   X[X_SCANU + r] = select(0u, 1u, W[W_ST + S_contentVol] > 0.0 && gsample(3u, latticePoint(r)) < 0.0);
 }
+// sim.rs into_cup: a lattice point hugging the cup (below the rim, within a particle radius of the
+// metal) goes inside the cup, a radius clear of the wall, so its push-out can't pick the outside
+fn sdHullInterior(p: vec3f) -> f32 {
+  let h = SP_T / 2.0;
+  return max(sdEllipsoid(p, vec3f(SP_A - h, SP_B - h, SP_C - h)), p.y);
+}
+fn intoCup(l: vec3f) -> vec3f {
+  let r = G.g1.x;
+  if (l.y >= 0.0 || sdSolid(l) >= r) { return l; }
+  let d = sdHullInterior(l);
+  if (d <= -r) { return l; }
+  var g = vec3f(sdHullInterior(l + vec3f(GEPS, 0, 0)) - sdHullInterior(l - vec3f(GEPS, 0, 0)),
+                sdHullInterior(l + vec3f(0, GEPS, 0)) - sdHullInterior(l - vec3f(0, GEPS, 0)),
+                sdHullInterior(l + vec3f(0, 0, GEPS)) - sdHullInterior(l - vec3f(0, 0, GEPS)));
+  let gl = length(g);
+  g = select(g / gl, vec3f(0.0), gl == 0.0);
+  return l - (d + r) * g;
+}
 @compute @workgroup_size(64)
 fn releaseSpawn(@builtin(global_invocation_id) id: vec3u) {
   let r = id.x;
@@ -307,7 +325,7 @@ fn releaseSpawn(@builtin(global_invocation_id) id: vec3u) {
   let ord = X[X_LIST + r];
   if (f32(n0 + ord) >= min(G.g6.z, f32(CAP))) { return; }
   let l = latticePoint(r);
-  let w = toWorld(G.R0, G.R1, G.R2, G.T, l);
+  let w = toWorld(G.R0, G.R1, G.R2, G.T, intoCup(l));
   let vi = voxelAt(3u, l);
   spawnAt(n0 + ord, w, spoonPointVel(w), X[X_COL + GN[3].w + u32(max(vi, 0))]);
 }
