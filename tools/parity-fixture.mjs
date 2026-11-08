@@ -1,0 +1,64 @@
+// Writes the fixtures for rust/core/tests/parity.rs from the JS simulation:
+//   node tools/parity-fixture.mjs
+// - scoop.csv / plunge.csv: per-frame spoon pose, ice volumes, particle count, ledger, cut force
+// - math.csv: Math.sin/cos/cbrt/acos/atan2/asin samples (the Rust port must match V8 bit for bit)
+import fs from 'node:fs';
+import * as M from '../src/math.js';
+import { Sim, flavorRGBA } from '../src/sim/sim.js';
+import { BOWLS, FLAVORS } from '../src/sim/sdf.js';
+
+const OUT = new URL('../rust/core/tests/fixtures/', import.meta.url);
+fs.mkdirSync(OUT, { recursive: true });
+const num = (v) => (Number.isInteger(v) ? String(v) : v.toPrecision(17));
+
+// Scenario steps: [x, y, z, ex, ey, ez, frames] (target position + XYZ euler) or ['eat'].
+// The same lists are hard-coded in parity.rs.
+const B0 = BOWLS[0];
+const SCENARIOS = {
+  scoop: [
+    [B0.cx - 0.03, 0.14, 0, 0, 0, 0.5, 90],
+    [B0.cx - 0.02, 0.085, 0, 0, 0, 0.5, 150],
+    [B0.cx + 0.025, 0.088, 0, 0, 0, 0, 150],
+    [B0.cx + 0.025, 0.16, 0, 0, 0, 0, 120],
+  ],
+  plunge: [0, 1].flatMap(() => [
+    [B0.cx, 0.14, 0, 0, 0, 0, 60],
+    [B0.cx, 0.0, 0, 0, 0, 0, 240],
+    [B0.cx, 0.15, 0, 0, 0, 0, 150],
+    ['eat'],
+  ]),
+};
+
+for (const [name, script] of Object.entries(SCENARIOS)) {
+  const sim = new Sim();
+  const rows = ['frame,px,py,pz,qx,qy,qz,qw,content,bowl0,particles,debt,cut,eaten'];
+  let frame = 0;
+  for (const s of script) {
+    if (s[0] === 'eat') {
+      sim.eat();
+      continue;
+    }
+    sim.spoon.setTarget(new M.Vector3(s[0], s[1], s[2]), new M.Quaternion().setFromEuler(new M.Euler(s[3], s[4], s[5])));
+    for (let f = 0; f < s[6]; f++) {
+      sim.step(1 / 60);
+      frame++;
+      const sp = sim.spoon;
+      rows.push([frame, sp.pos.x, sp.pos.y, sp.pos.z, sp.quat.x, sp.quat.y, sp.quat.z, sp.quat.w,
+        sim.content.volume(), sim.grids[0].volume(), sim.fluid.n, sim.debtVolume(), sim.cutForce, sim.eatenVolume].map(num).join(','));
+    }
+  }
+  fs.writeFileSync(new URL(`${name}.csv`, OUT), rows.join('\n') + '\n');
+  console.log(`${name}: ${frame} frames`);
+}
+
+let s = 12345 >>> 0;
+const rows = ['x,cos,sin,cbrt,acos,atan2,asin'];
+for (let i = 0; i < 4000; i++) {
+  s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+  const x = (s / 4294967296) * Math.PI * 8 - Math.PI * 4;
+  const u = x / (Math.PI * 4);
+  rows.push([x, Math.cos(x), Math.sin(x), Math.cbrt(x * 1e-7), Math.acos(u), Math.atan2(x - 3, 1.3), Math.asin(u)].map(num).join(','));
+}
+fs.writeFileSync(new URL('math.csv', OUT), rows.join('\n') + '\n');
+fs.writeFileSync(new URL('flavors.csv', OUT), FLAVORS.map((f) => flavorRGBA(f).join(',')).join('\n') + '\n');
+console.log('math: 4000 samples, flavors: 3');

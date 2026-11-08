@@ -45,8 +45,25 @@ screenshots: build
 ws-example:
     uv run --with websockets tools/ws_example_server.py
 
-# 執行完整驗證流程 (單元測試 + 生產建置 + 截圖)
-verify: test build screenshots
+# Rust 核心：單元測試 + 不穿模測試 + 與 JS 逐幀比對（bit-identical）
+rust-test:
+    cd rust && cargo test --release
+
+# 重新產生 JS 對照資料再跑比對（改了 JS 或 Rust 模擬後執行）
+parity:
+    node tools/parity-fixture.mjs
+    cd rust && cargo test --release --test parity
+
+# Rust 效能測試（挖取 + 三次下挖，印出 ms/frame 與質量）
+rust-bench:
+    cd rust && cargo run --release -q -p icecream-cli -- bench
+
+# 無頭數位孿生：stdin/stdout JSON lines（和 WebSocket 同一套訊息）
+rust-serve:
+    cd rust && cargo run --release -q -p icecream-cli -- serve
+
+# 執行完整驗證流程 (JS 測試 + Rust 測試 + 生產建置 + 截圖)
+verify: test rust-test build screenshots
     @echo "✅ 測試、建置與截圖全部完成！"
 
 # 清理建置產物

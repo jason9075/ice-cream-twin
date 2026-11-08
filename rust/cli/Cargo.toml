@@ -1,0 +1,13 @@
+[package]
+name = "icecream-cli"
+version = "0.1.0"
+edition.workspace = true
+description = "Headless ice-cream digital twin: JSON-lines control over stdin/stdout, benchmark"
+
+[[bin]]
+name = "icecream"
+path = "src/main.rs"
+
+[dependencies]
+icecream-core = { path = "../core" }
+serde_json = "1"

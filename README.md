@@ -126,6 +126,44 @@ window.__view.capturePNG(1280, 800);      // offscreen render of one frame (virt
 Example: `just ws-example` (or `uv run --with websockets tools/ws_example_server.py`), then press Connect
 on the page (or call `sim.connect()`). Using ROS coordinates, it scoops vanilla → eats → scoops mint → eats.
 
+## Rust core (`rust/`)
+
+The simulation is also available as a Rust library, `icecream-core`, plus a headless CLI. This is the base
+for a native digital-twin app: direct ROS 2, batch and parallel runs, no browser.
+
+- `core/` is a port of `src/sim/*.js` and `src/math.js`: the spoon controller, the SDF grids, the PBF
+  particles, scooping, the volume ledger and the frames. The WebGPU renderer stays in JS for now.
+- **Bit-for-bit parity with the JS version.** A scripted scoop (510 frames) and two plunge-and-eat cycles
+  (900 frames) produce identical spoon poses, ice volumes, particle counts and ledger values in both. To get
+  there, the Rust code:
+  - stores f32 wherever JS uses a `Float32Array` and does the arithmetic in f64;
+  - copies V8's `Math.hypot` algorithm;
+  - ports V8's fdlibm `sin`, `cos` and `cbrt` (`v8math.rs`; the `libm` crate differs in the last bit for
+    about 1% of inputs);
+  - uses the same RNG and hash wrapping.
+- The fixtures are written by `node tools/parity-fixture.mjs` and checked by `cargo test`. CI regenerates
+  them with Node 22 (V8 12.4) and fails if they no longer match.
+- The collision tests (no penetration, no tunnelling, sliding along the wall) and the mass-conservation tests
+  are ported too.
+
+```bash
+just rust-test     # 13 tests: collision, mass, parity with JS
+just parity        # regenerate the JS fixtures, then compare
+just rust-bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g
+just rust-serve    # headless twin over stdin/stdout
+```
+
+**`icecream serve`** speaks the WebSocket bridge's messages as JSON lines (one object per line), so a ROS node
+or a Python script can run it as a subprocess:
+
+```text
+-> {"type":"config","frame":"ros"}
+-> {"type":"set_target","position":[-0.18,0,0.085],"quaternion":[0,0,0,1]}
+-> {"type":"step","frames":200}
+<- {"type":"state","spoon":{...},"scoopedGrams":11.7,"bowlGrams":{...},"blocked":false,...}
+-> {"type":"eat"}
+```
+
 ## Files
 
 ```
@@ -138,7 +176,9 @@ src/sim/sim.js         scoop / copy / freeze / tip / Eat, volume ledger, stats
 src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
 src/ui/panel.js        control panel
 src/bridge.js          window.sim and the WebSocket bridge
-tools/                 headless screenshots, WebSocket example controller
+tools/                 headless screenshots, WebSocket example controller, parity fixtures
+rust/core/             Rust port of the simulation (lib icecream_core) + tests and JS fixtures
+rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
 ```
 
 ## Known limitations

@@ -1,0 +1,43 @@
+name: Rust core
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The parity fixtures come from the JS simulation and depend on V8's Math
+      # implementation: keep the Node major version that generated them (V8 12.4).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fixtures are up to date with the JS simulation
+        run: |
+          node tools/parity-fixture.mjs
+          git diff --exit-code rust/core/tests/fixtures
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Test (collision, mass conservation, bit-for-bit parity with JS)
+        working-directory: rust
+        run: cargo test --release
+
+      - name: Benchmark
+        working-directory: rust
+        run: cargo run --release -q -p icecream-cli -- bench
