@@ -1,0 +1,20 @@
+{
+  "name": "ice-cream-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ice-cream scooping digital-twin sandbox: SDF + PBF particles (Claybook-inspired), native WebGPU",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "lil-gui": "^0.21.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.0.0",
+    "vite": "^8.0.0"
+  }
+}
