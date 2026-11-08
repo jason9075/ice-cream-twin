@@ -75,7 +75,7 @@ await page.evaluate(() => {
 await new Promise((r) => setTimeout(r, 500));
 await shot('04-gripper.png');
 
-// tip the scoop back out: loose particles (GPU compute solver by default) pouring into the bowl
+// tip the scoop back out: loose particles pouring into the bowl
 const poured = await page.evaluate(async () => {
   const s = window.sim;
   s.pause(true);
@@ -83,11 +83,11 @@ const poured = await page.evaluate(async () => {
   window.__view.showParticles(true);
   const st = await s.stepFrames(24);
   window.__view.camera.lookFrom({ x: 0.16, y: 0.24, z: 0.2 }, { x: 0, y: 0.1, z: -0.02 });
-  return { particles: st.particles, solver: st.fluidSolver, gpuMs: st.fluidGpuMs };
+  return { particles: st.particles, simulation: st.simulation, gpuMs: st.gpuMs ?? 0 };
 });
 await new Promise((r) => setTimeout(r, 300));
 await shot('05-pour.png');
-console.log(`pour: ${poured.particles} loose particles, ${poured.solver} solver, ${poured.gpuMs.toFixed(2)} ms`);
+console.log(`pour: ${poured.particles} loose particles, ${poured.simulation} simulation, frame ${poured.gpuMs.toFixed(2)} ms`);
 
 console.log(JSON.stringify({ arm: { joints: state.arm?.jointsDeg?.map((v) => +v.toFixed(1)), errMm: state.arm?.trackingErrorMm }, scoopedGrams: state.scoopedGrams, particles: state.particles, bowls: state.bowlGrams, blocked: state.blocked }, null, 1));
 console.log(errors.length ? errors.join('\n') : 'no console errors');

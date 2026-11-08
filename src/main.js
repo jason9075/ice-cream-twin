@@ -4,7 +4,8 @@ import { Sim } from './sim/sim.js';
 import { defaultParams } from './sim/params.js';
 import { BOWLS, bowlProfile } from './sim/sdf.js';
 import { createRenderer } from './gpu/renderer.js';
-import { GpuFluid } from './gpu/fluid-gpu.js';
+import { GpuSim } from './gpu/sim/gpu-sim.js';
+import { CAP, MAX_SPILLED } from './gpu/sim/layout.js';
 import { OrbitCamera } from './gpu/camera.js';
 import * as geo from './gpu/geometry.js';
 import { Panel } from './ui/panel.js';
@@ -42,21 +43,23 @@ async function main() {
 
   // ------------------------------------------------------------------ simulation
   const params = defaultParams();
-  const sim = new Sim(params);
+  // The whole simulation runs on the GPU (src/gpu/sim, Claybook-style); ?sim=cpu runs the CPU reference.
+  const simMode = new URLSearchParams(location.search).get('sim') === 'cpu' ? 'cpu' : 'gpu';
+  const sim = simMode === 'gpu' ? new GpuSim(r.device, params) : new Sim(params);
+  const simulation = {
+    get mode() {
+      return simMode;
+    },
+    set mode(v) {
+      if (v === simMode) return;
+      const u = new URL(location.href);
+      u.searchParams.set('sim', v);
+      location.href = u.href; // the state lives in different places: reload
+    },
+  };
   // The SO-101 holds the spoon: targets are projected onto what it can reach, and it follows the spoon.
   const arm = new Arm();
   arm.reset(sim);
-  // Particle solver: WebGPU compute (default) or the CPU reference path (?fluid=cpu, or the panel).
-  const gpuFluid = new GpuFluid(r.device, sim);
-  const fluidSolver = {
-    get backend() {
-      return sim.gpuFluid ? 'gpu' : 'cpu';
-    },
-    set backend(v) {
-      sim.gpuFluid = v === 'gpu' ? gpuFluid : null;
-    },
-  };
-  fluidSolver.backend = new URLSearchParams(location.search).get('fluid') === 'cpu' ? 'cpu' : 'gpu';
   const step = async (dt) => {
     arm.constrain(sim);
     await sim.stepAsync(dt);
@@ -83,12 +86,14 @@ async function main() {
 
   const g0 = sim.grids[0];
   const worldBox = r.createMesh(geo.box([0, 0, 0], [g0.sx, g0.sy, g0.sz]));
-  const bowlVols = sim.grids.map((g) => r.createVolume(g, worldBox));
+  const external = simMode === 'gpu'; // the GPU simulation writes the textures and instances itself
+  const bowlVols = sim.grids.map((g) => r.createVolume(g, worldBox, { external }));
   const c = sim.content;
-  const contentVol = r.createVolume(c, r.createMesh(geo.box([0, 0, 0], [c.sx, c.sy, c.sz])));
+  const contentVol = r.createVolume(c, r.createMesh(geo.box([0, 0, 0], [c.sx, c.sy, c.sz])), { external });
 
-  const particles = r.createInstances(sphereMesh, sim.fluid.cap);
-  const spilled = r.createInstances(sphereMesh, sim.spilled.length / 3);
+  const particles = r.createInstances(sphereMesh, CAP);
+  const spilled = r.createInstances(sphereMesh, MAX_SPILLED);
+  if (external) sim.attachViews({ particles, spilled, volumes: [...bowlVols, contentVol] });
   const samples = r.createInstances(sphereMesh, sim.spoon.nSamples, { unlit: true });
   samples.visible = false;
 
@@ -138,9 +143,10 @@ async function main() {
     showToast.t = setTimeout(() => toast.classList.remove('on'), 1600);
   };
   const actions = {
-    eat() {
-      const g = sim.eat();
+    async eat() {
+      const g = await sim.eat();
       showToast(g > 0.05 ? `Yum! ${g.toFixed(1)} g eaten` : 'Spoon is empty');
+      return g;
     },
     release: () => sim.releaseContent(),
     reset: () => {
@@ -151,7 +157,7 @@ async function main() {
     pause: (v) => (paused = v),
     step,
     arm,
-    fluidSolver,
+    simulation,
   };
   const panel = new Panel(sim, actions);
   let gui;
@@ -166,10 +172,10 @@ async function main() {
   api.disconnect = () => bridge.disconnect();
 
   gui = new GUI({ title: 'Parameters', width: 300 });
+  gui.add(simulation, 'mode', { 'GPU (compute shaders)': 'gpu', 'CPU (reference)': 'cpu' }).name('simulation');
   {
     const f = gui.addFolder('Fluid (loose ice cream)');
     const p = params.fluid;
-    f.add(fluidSolver, 'backend', { 'GPU (compute shader)': 'gpu', 'CPU (reference)': 'cpu' }).name('solver');
     f.add(p, 'particleRadius', 0.0008, 0.0025, 0.0001).name('particle radius (m)');
     f.add(p, 'viscosity', 0, 1, 0.01).name('viscosity (XSPH)');
     f.add(p, 'cohesion', 0, 1, 0.01).name('cohesion / stickiness');
@@ -307,12 +313,14 @@ async function main() {
     bowlVols.forEach((v) => v.sync());
     contentVol.sync();
 
-    const f = sim.fluid;
-    const rad = (f.r > 0 ? f.r : params.fluid.particleRadius) * 1.15;
-    writeParticles(particles, f.n, f.pos, f.rgba, rad);
-    if (sim.spilledVersion !== spilledVersion) {
-      spilledVersion = sim.spilledVersion;
-      writeParticles(spilled, sim.nSpilled, sim.spilled, sim.spilledRGBA, rad);
+    if (!external) {
+      const f = sim.fluid;
+      const rad = (f.r > 0 ? f.r : params.fluid.particleRadius) * 1.15;
+      writeParticles(particles, f.n, f.pos, f.rgba, rad);
+      if (sim.spilledVersion !== spilledVersion) {
+        spilledVersion = sim.spilledVersion;
+        writeParticles(spilled, sim.nSpilled, sim.spilled, sim.spilledRGBA, rad);
+      }
     }
     if (samples.visible) {
       const s = sp.samples;
@@ -341,9 +349,8 @@ async function main() {
     camera,
     arm,
     renderer: r,
-    // internals for headless checks (tools/fluid-gpu-check.mjs)
+    // internals for headless checks (tools/shot.mjs)
     sim,
-    gpuFluid,
     /** Show or hide the loose particles (View panel). */
     showParticles(v = true) {
       particles.visible = v;

@@ -64,7 +64,6 @@ export class Sim {
     this.content = new SdfGrid(CONTENT_ORIGIN, CONTENT_CELL, CONTENT_DIMS, 4);
     this.spoon = new SpoonController(params.spoon);
     this.fluid = new Fluid(16000);
-    this.gpuFluid = null; // set to a GpuFluid (src/gpu/fluid-gpu.js) to run the particles on the GPU
     this.R = new Float64Array(9);
     this.spilled = new Float32Array(MAX_SPILLED * 3);
     this.spilledRGBA = new Uint8Array(MAX_SPILLED * 4);
@@ -174,17 +173,9 @@ export class Sim {
     this._stepEnd(s);
   }
 
-  /**
-   * One frame with the particle solver on the GPU when `this.gpuFluid` is set (src/gpu/fluid-gpu.js),
-   * otherwise the same as step(). The spoon, carving, carrying, freezing and the volume ledger stay on
-   * the CPU either way; only the PBF sub-steps move.
-   */
+  /** Same as step(); the interface the GPU simulation (src/gpu/sim/gpu-sim.js) shares. */
   async stepAsync(dt) {
-    if (!this.gpuFluid) return this.step(dt);
-    const s = this._stepBegin(dt);
-    if (this.fluid.n) await this.gpuFluid.run(s.dt / s.sub, s.sub, this);
-    else this.gpuFluid.lastMs = 0;
-    this._stepEnd(s);
+    this.step(dt);
   }
 
   _stepBegin(dt) {
@@ -1228,8 +1219,7 @@ export class Sim {
       spilledGrams: this.grams(this.spilledVolume),
       bowlGrams: Object.fromEntries(BOWLS.map((b, i) => [b.flavor.id, this.grams(this.bowlVolumes[i])])),
       particles: this.fluid.n,
-      fluidSolver: this.gpuFluid ? 'gpu' : 'cpu',
-      fluidGpuMs: this.gpuFluid ? this.gpuFluid.lastMs : 0,
+      simulation: 'cpu',
     };
   }
 }

@@ -66,6 +66,7 @@ export function installApi(sim, hooks) {
       const k = unit === 'deg' ? Math.PI / 180 : 1;
       hooks.arm.setJoints(sim, joints.map((v) => v * k));
     },
+    /** Empty the spoon; a Promise of the grams eaten (the GPU simulation reads them back). */
     eat: () => hooks.eat(),
     release: () => sim.releaseContent(),
     reset: () => hooks.reset(),
@@ -80,16 +81,16 @@ export function installApi(sim, hooks) {
     getParams: () => JSON.parse(JSON.stringify(sim.params)),
     /**
      * Run the simulation without rendering (e.g. for fast scripted tests). Returns a Promise of the
-     * state: with the GPU particle solver every frame waits for the GPU.
+     * state: with the GPU simulation every frame waits for the previous one's statistics.
      */
     async stepFrames(n = 1, dt = 1 / 60) {
       for (let i = 0; i < n; i++) await (hooks.step ?? ((t) => sim.stepAsync(t)))(dt);
       return api.getState();
     },
-    /** Particle solver: 'gpu' (WebGPU compute shaders) or 'cpu' (the reference implementation). */
-    setFluidSolver(backend) {
-      if (hooks.fluidSolver) hooks.fluidSolver.backend = backend;
-      return sim.gpuFluid ? 'gpu' : 'cpu';
+    /** Which simulation runs: 'gpu' (compute shaders) or 'cpu' (reference); setting it reloads the page. */
+    setSimulation(mode) {
+      if (hooks.simulation) hooks.simulation.mode = mode;
+      return hooks.simulation?.mode;
     },
     /** Pause the real-time loop (stepFrames still works). */
     pause: (v = true) => hooks.pause(v),
