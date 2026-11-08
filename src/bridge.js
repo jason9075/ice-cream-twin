@@ -33,6 +33,14 @@ function stateIn(state, frame) {
       angularVelocity: frames.posToRos(state.spoon.angularVelocity),
     },
     target: conv(state.target),
+    // the base yaw is about the up axis in both frames, so only the position changes
+    ...(state.arm && {
+      arm: {
+        ...state.arm,
+        goal: conv(state.arm.goal),
+        base: { ...state.arm.base, position: frames.posToRos(state.arm.base.position) },
+      },
+    }),
   };
 }
 
