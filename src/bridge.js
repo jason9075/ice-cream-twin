@@ -45,7 +45,18 @@ export function installApi(sim, hooks) {
       sim.spoon.setTarget(p ? new M.Vector3(...p) : null, q ? new M.Quaternion(...q) : null);
     },
     getState(frame = 'yup') {
-      return stateIn(sim.getState(), frame);
+      const st = sim.getState();
+      if (hooks.arm) st.arm = hooks.arm.state();
+      return stateIn(st, frame);
+    },
+    /**
+     * Joint-space command for the SO-101 (URDF joint convention): shoulder_pan, shoulder_lift,
+     * elbow_flex, wrist_flex, wrist_roll. The spoon target becomes the pose these angles give.
+     */
+    setJoints({ joints, unit = 'rad' } = {}) {
+      if (!hooks.arm || !joints) return;
+      const k = unit === 'deg' ? Math.PI / 180 : 1;
+      hooks.arm.setJoints(sim, joints.map((v) => v * k));
     },
     eat: () => hooks.eat(),
     release: () => sim.releaseContent(),
@@ -61,7 +72,7 @@ export function installApi(sim, hooks) {
     getParams: () => JSON.parse(JSON.stringify(sim.params)),
     /** Run the simulation without rendering (e.g. for fast scripted tests). */
     stepFrames(n = 1, dt = 1 / 60) {
-      for (let i = 0; i < n; i++) sim.step(dt);
+      for (let i = 0; i < n; i++) (hooks.step ?? ((t) => sim.step(t)))(dt);
       return api.getState();
     },
     /** Pause the real-time loop (stepFrames still works). */
@@ -133,6 +144,9 @@ export class WsBridge {
     switch (m.type) {
       case 'set_target':
         this.api.setTarget({ position: m.position, quaternion: m.quaternion, frame });
+        break;
+      case 'set_joints':
+        this.api.setJoints({ joints: m.joints, unit: m.unit });
         break;
       case 'eat':
         this.api.eat();

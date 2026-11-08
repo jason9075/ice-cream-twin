@@ -8,6 +8,10 @@ import { OrbitCamera } from './gpu/camera.js';
 import * as geo from './gpu/geometry.js';
 import { Panel } from './ui/panel.js';
 import { installApi, WsBridge } from './bridge.js';
+import { Arm } from './robot/arm.js';
+import { createArmView } from './robot/render.js';
+import { ARM_JOINTS, LIMITS } from './robot/so101.js';
+import { HOME_POS, HOME_QUAT } from './sim/spoon.js';
 import './style.css';
 
 const canvas = document.getElementById('gpu');
@@ -38,6 +42,14 @@ async function main() {
   // ------------------------------------------------------------------ simulation
   const params = defaultParams();
   const sim = new Sim(params);
+  // The SO-101 holds the spoon: targets are projected onto what it can reach, and it follows the spoon.
+  const arm = new Arm();
+  arm.reset(sim);
+  const step = (dt) => {
+    arm.constrain(sim);
+    sim.step(dt);
+    arm.follow(sim);
+  };
 
   // ------------------------------------------------------------------ scene
   const sphereMesh = r.createMesh(geo.sphere(8, 12));
@@ -68,15 +80,23 @@ async function main() {
   const samples = r.createInstances(sphereMesh, sim.spoon.nSamples, { unlit: true });
   samples.visible = false;
 
+  let armView = null;
+  try {
+    armView = await createArmView(r, arm);
+  } catch (e) {
+    console.error('SO-101 meshes failed to load:', e);
+  }
+  const armObjects = armView ? armView.objects : [];
+
   const scene = {
-    objects: [table, ...bowls, spoon],
+    objects: [table, ...bowls, spoon, ...armObjects],
     ghosts: [ghost],
     instances: [particles, spilled],
     overlays: [samples],
     volumes: [...bowlVols, contentVol],
-    shadowCasters: { objects: [...bowls, spoon], instances: [particles, spilled], volumes: [...bowlVols, contentVol] },
+    shadowCasters: { objects: [...bowls, spoon, ...armObjects], instances: [particles, spilled], volumes: [...bowlVols, contentVol] },
   };
-  const light = { dir: new Vector3(0.45, 1.0, 0.35).normalize(), center: new Vector3(0, 0.06, 0), extent: 0.42 };
+  const light = { dir: new Vector3(0.45, 1.0, 0.35).normalize(), center: new Vector3(0, 0.08, -0.08), extent: 0.5 };
 
   // ------------------------------------------------------------------ camera + mouse target
   let dragPlaneY = 0;
@@ -111,11 +131,18 @@ async function main() {
       showToast(g > 0.05 ? `Yum! ${g.toFixed(1)} g eaten` : 'Spoon is empty');
     },
     release: () => sim.releaseContent(),
-    reset: () => sim.reset(),
+    reset: () => {
+      sim.reset();
+      if (arm.enabled) arm.reset(sim);
+    },
+    home: () => (arm.enabled ? sim.spoon.setTarget(arm.home.pos, arm.home.quat) : sim.spoon.setTarget(HOME_POS, HOME_QUAT)),
     pause: (v) => (paused = v),
+    step,
+    arm,
   };
   const panel = new Panel(sim, actions);
   let gui;
+  let armFolder = null;
   const api = installApi(sim, { ...actions, paramsChanged: () => gui.controllersRecursive().forEach((x) => x.updateDisplay()) });
   const bridge = new WsBridge(api);
   /** Connect to an external controller, e.g. sim.connect('ws://localhost:8765', 'ros'). */
@@ -146,6 +173,7 @@ async function main() {
     fr.add(p, 'stampSmooth', 0, 0.004, 0.0001).name('stamp smoothing (m)');
     fr.add(p, 'stampOnContact').name('freeze on first contact');
     fr.close();
+    f.close(); // keep the arm's joint sliders in view
     const i = gui.addFolder('Ice cream');
     const ip = params.ice;
     i.add(ip, 'hardness', 0, 120, 1).name('hardness (kPa)');
@@ -163,6 +191,35 @@ async function main() {
     s.add(sp, 'maxLinSpeed', 0.01, 0.5, 0.01).name('max speed (m/s)');
     s.add(sp, 'maxAngSpeed', 10, 360, 5).name('max ang speed (°/s)');
     s.add(sp, 'maxCutForce', 1, 100, 1).name('max cut force (N)');
+    const a = gui.addFolder('Robot arm (SO-101)');
+    a.add(arm, 'enabled').name('arm holds the spoon').onChange((x) => {
+      if (x) arm.reset(sim);
+    });
+    a.add(arm, 'constrainTarget').name('limit target to reach');
+    const deg = (v) => (v * 180) / Math.PI;
+    const jointUI = Object.fromEntries(ARM_JOINTS.map((n, k) => [n, deg(arm.q[k])]));
+    let jointEdited = 0; // while the user drags a joint slider, don't overwrite it with the actual angle
+    const jointCtl = ARM_JOINTS.map((n, k) =>
+      a
+        .add(jointUI, n, deg(LIMITS[k][0]), deg(LIMITS[k][1]), 0.5)
+        .name(`${n} (°)`)
+        .onChange(() => {
+          jointEdited = performance.now();
+          arm.setJoints(sim, ARM_JOINTS.map((m) => (jointUI[m] * Math.PI) / 180));
+        }),
+    );
+    const armInfo = { error: '' };
+    const errCtl = a.add(armInfo, 'error').name('tracking error').disable();
+    a.syncJoints = () => {
+      if (performance.now() - jointEdited > 1500)
+        ARM_JOINTS.forEach((n, k) => {
+          jointUI[n] = Math.round(deg(arm.q[k]) * 10) / 10;
+          jointCtl[k].updateDisplay();
+        });
+      armInfo.error = `${arm.err.mm.toFixed(2)} mm / ${arm.err.deg.toFixed(2)}°`;
+      errCtl.updateDisplay();
+    };
+    armFolder = a;
     const v = gui.addFolder('View');
     const view = { ghost: true, samples: false, particles: false };
     particles.visible = view.particles;
@@ -218,17 +275,20 @@ async function main() {
       let n = 0;
       while (acc >= STEP && n < 2) {
         panel.applyJog(STEP);
-        sim.step(STEP);
+        step(STEP);
         acc -= STEP;
         n++;
       }
       if (n === 2) acc = 0; // fall behind gracefully instead of spiralling
     }
 
+    armView?.update();
     const sp = sim.spoon;
     const spoonModel = mat4.compose(sp.pos, sp.quat);
     spoon.setModel(spoonModel);
-    ghost.setModel(mat4.compose(sp.targetPos, sp.targetQuat));
+    // the ghost shows where the spoon is heading: the arm's goal (reachable), or the raw target
+    if (arm.enabled) ghost.setModel(mat4.compose(arm.goal.pos, arm.goal.quat));
+    else ghost.setModel(mat4.compose(sp.targetPos, sp.targetQuat));
     contentVol.setModel(mat4.multiply(spoonModel, mat4.translation(c.ox, c.oy, c.oz)));
     bowlVols.forEach((v) => v.sync());
     contentVol.sync();
@@ -257,6 +317,7 @@ async function main() {
     if (uiTimer > 0.1) {
       uiTimer = 0;
       panel.update(fps);
+      armFolder?.syncJoints();
     }
     requestAnimationFrame(frame);
   }
@@ -264,6 +325,7 @@ async function main() {
 
   window.__view = {
     camera,
+    arm,
     renderer: r,
     /** Offscreen render -> PNG data URL (headless tests, virtual camera). */
     async capturePNG(width = 1280, height = 800) {

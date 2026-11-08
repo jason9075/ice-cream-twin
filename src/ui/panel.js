@@ -152,7 +152,8 @@ export class Panel {
   }
 
   home() {
-    this.sim.spoon.setTarget(HOME_POS, HOME_QUAT);
+    if (this.actions.home) this.actions.home();
+    else this.sim.spoon.setTarget(HOME_POS, HOME_QUAT);
   }
 
   fillPose() {

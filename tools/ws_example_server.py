@@ -15,22 +15,41 @@ import math
 import websockets
 
 BOWL_X = {"vanilla": -0.18, "strawberry": 0.0, "mint": 0.18}
+# The SO-101 stands behind the bowls at ROS (0, 0.28, 0); its pan axis is ~3.9 cm in front of that.
+PAN_AXIS = (0.0, 0.241)
 
 
-def tilt_quat(rad):
-    """Cup tipped toward +x (three.js rotation about +Z == ROS rotation about -Y)."""
-    return [0.0, -math.sin(rad / 2), 0.0, math.cos(rad / 2)]
+def quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+
+
+def spoon_quat(x, y, pitch):
+    """Handle pointing at the arm (yaw about ROS z), cup tipped nose-down by `pitch` (about ROS -Y)."""
+    yaw = math.atan2(PAN_AXIS[1] - y, PAN_AXIS[0] - x)
+    yaw_q = [0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)]
+    tilt_q = [0.0, -math.sin(pitch / 2), 0.0, math.cos(pitch / 2)]
+    return quat_mul(yaw_q, tilt_q)
 
 
 def scoop(bowl):
     x = BOWL_X[bowl]
-    dig, level = tilt_quat(0.5), tilt_quat(0.0)
-    return [
-        ([x - 0.03, 0.0, 0.14], dig, 1.5),
-        ([x - 0.02, 0.0, 0.085], dig, 2.5),  # push in
-        ([x + 0.025, 0.0, 0.088], level, 2.5),  # drag + level the cup
-        ([x + 0.025, 0.0, 0.16], level, 2.0),  # lift
-    ]
+    # unit vector from the bowl centre toward the arm: dig on the far side, drag toward the arm
+    dx, dy = PAN_AXIS[0] - x, PAN_AXIS[1]
+    n = math.hypot(dx, dy)
+    ux, uy = dx / n, dy / n
+
+    def at(s, z):
+        return [x + ux * s, uy * s, z]
+
+    steps = [(at(-0.02, 0.14), 0.5, 1.5), (at(-0.015, 0.086), 0.5, 2.5), (at(0.025, 0.088), 0.0, 2.5), (at(0.03, 0.16), 0.0, 2.0)]
+    return [(p, spoon_quat(p[0], p[1], pitch), secs) for p, pitch, secs in steps]
 
 
 async def handler(ws):
@@ -63,7 +82,8 @@ async def handler(ws):
 
     await run("vanilla")
     await run("mint")
-    await ws.send(json.dumps({"type": "set_target", "position": [0.0, -0.02, 0.17], "quaternion": [0, 0, 0, 1]}))
+    # finish with a joint-space command (SO-101 URDF joint order, degrees)
+    await ws.send(json.dumps({"type": "set_joints", "joints": [0, -90, 50, 70, 0], "unit": "deg"}))
     print("done; bowls:", {k: round(v, 1) for k, v in latest.get("bowlGrams", {}).items()})
     task.cancel()
 

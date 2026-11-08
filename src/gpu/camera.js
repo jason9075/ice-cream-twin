@@ -8,8 +8,8 @@ import { Vector3, mat4 } from '../math.js';
 export class OrbitCamera {
   constructor(el, { onTargetDrag, onTargetHeight } = {}) {
     this.el = el;
-    this.target = new Vector3(0, 0.07, 0);
-    this.distance = 0.62;
+    this.target = new Vector3(0, 0.08, -0.07);
+    this.distance = 0.74;
     this.azimuth = 0.24; // around Y, 0 = looking from +Z
     this.polar = 0.98; // from +Y
     this.fov = (38 * Math.PI) / 180;
