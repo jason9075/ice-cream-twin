@@ -1,11 +1,13 @@
 // Writes the fixtures for rust/core/tests/parity.rs from the JS simulation:
 //   node tools/parity-fixture.mjs
 // - scoop.csv / plunge.csv: per-frame spoon pose, ice volumes, particle count, ledger, cut force
+// - arm.csv: the SO-101 holding the spoon (src/robot/arm.js): spoon pose, joint angles, command, error
 // - math.csv: Math.sin/cos/cbrt/acos/atan2/asin samples (the Rust port must match V8 bit for bit)
 import fs from 'node:fs';
 import * as M from '../src/math.js';
 import { Sim, flavorRGBA } from '../src/sim/sim.js';
 import { BOWLS, FLAVORS } from '../src/sim/sdf.js';
+import { Arm } from '../src/robot/arm.js';
 
 const OUT = new URL('../rust/core/tests/fixtures/', import.meta.url);
 fs.mkdirSync(OUT, { recursive: true });
@@ -49,6 +51,44 @@ for (const [name, script] of Object.entries(SCENARIOS)) {
   }
   fs.writeFileSync(new URL(`${name}.csv`, OUT), rows.join('\n') + '\n');
   console.log(`${name}: ${frame} frames`);
+}
+
+// The arm drives the spoon the way the page does: arm.constrain -> sim.step -> arm.follow.
+// Steps: ['go', x, y, z, pitch, frames] (handle toward the robot, cup pitched nose-down) or
+// ['joints', [5 angles], frames]. The same list is hard-coded in parity.rs.
+{
+  const ARM_SCRIPT = [
+    ['go', 0, 0.14, 0.02, 0.5, 80],
+    ['go', 0, 0.086, 0.015, 0.5, 150],
+    ['go', 0, 0.088, -0.025, 0, 150],
+    ['go', 0, 0.15, -0.03, 0, 100],
+    ['joints', [0.3, -1.5, 0.6, 1.0, 0.4], 150],
+    ['go', 0.18, 0.15, 0, 0.3, 200],
+  ];
+  const sim = new Sim();
+  const arm = new Arm();
+  arm.reset(sim);
+  const rows = ['frame,px,py,pz,qx,qy,qz,qw,q0,q1,q2,q3,q4,c0,c1,c2,c3,c4,errMm,errDeg,content'];
+  let frame = 0;
+  for (const s of ARM_SCRIPT) {
+    if (s[0] === 'go') {
+      const q = new M.Quaternion()
+        .setFromAxisAngle(new M.Vector3(0, 1, 0), Math.PI / 2)
+        .multiply(new M.Quaternion().setFromAxisAngle(new M.Vector3(0, 0, 1), s[4]));
+      sim.spoon.setTarget(new M.Vector3(s[1], s[2], s[3]), q);
+    } else arm.setJoints(sim, s[1]);
+    for (let f = 0; f < s[s.length - 1]; f++) {
+      arm.constrain(sim);
+      sim.step(1 / 60);
+      arm.follow(sim);
+      frame++;
+      const sp = sim.spoon;
+      rows.push([frame, sp.pos.x, sp.pos.y, sp.pos.z, sp.quat.x, sp.quat.y, sp.quat.z, sp.quat.w,
+        ...arm.q, ...arm.qCmd, arm.err.mm, arm.err.deg, sim.content.volume()].map(num).join(','));
+    }
+  }
+  fs.writeFileSync(new URL('arm.csv', OUT), rows.join('\n') + '\n');
+  console.log(`arm: ${frame} frames`);
 }
 
 let s = 12345 >>> 0;

@@ -4,6 +4,7 @@
 use icecream_core::math::{self, Quat, Vec3};
 use icecream_core::sdf::{bowls, FLAVORS};
 use icecream_core::sim::flavor_rgba;
+use icecream_core::robot::Arm;
 use icecream_core::Sim;
 
 enum Step {
@@ -90,6 +91,69 @@ fn plunge_matches_js() {
         script.push(Step::Eat);
     }
     run("plunge", include_str!("fixtures/plunge.csv"), &script);
+}
+
+enum ArmStep {
+    Go([f64; 4], usize),
+    Joints([f64; 5], usize),
+}
+
+/// The SO-101 driving the spoon (`arm.constrain` -> `sim.step` -> `arm.follow`), against arm.js.
+#[test]
+fn arm_matches_js() {
+    use std::f64::consts::PI;
+    let script = [
+        ArmStep::Go([0.0, 0.14, 0.02, 0.5], 80),
+        ArmStep::Go([0.0, 0.086, 0.015, 0.5], 150),
+        ArmStep::Go([0.0, 0.088, -0.025, 0.0], 150),
+        ArmStep::Go([0.0, 0.15, -0.03, 0.0], 100),
+        ArmStep::Joints([0.3, -1.5, 0.6, 1.0, 0.4], 150),
+        ArmStep::Go([0.18, 0.15, 0.0, 0.3], 200),
+    ];
+    let rows = parse(include_str!("fixtures/arm.csv"));
+    let mut sim = Sim::default();
+    let mut arm = Arm::default();
+    arm.reset(Some(&mut sim.spoon));
+    let mut frame = 0usize;
+    let names = [
+        "px", "py", "pz", "qx", "qy", "qz", "qw", "q0", "q1", "q2", "q3", "q4", "c0", "c1", "c2", "c3", "c4", "errMm", "errDeg", "content",
+    ];
+    for s in &script {
+        let n = match s {
+            ArmStep::Go(t, n) => {
+                let q = Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), PI / 2.0).mul(Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), t[3]));
+                sim.set_target(Some(Vec3::new(t[0], t[1], t[2])), Some(q));
+                *n
+            }
+            ArmStep::Joints(j, n) => {
+                arm.set_joints(*j);
+                *n
+            }
+        };
+        for _ in 0..n {
+            arm.constrain(&mut sim.spoon, 1.0 / 60.0);
+            sim.step(1.0 / 60.0);
+            arm.follow(&sim.spoon);
+            let r = &rows[frame];
+            frame += 1;
+            let sp = &sim.spoon;
+            let mut got = vec![sp.pos.x, sp.pos.y, sp.pos.z, sp.quat.x, sp.quat.y, sp.quat.z, sp.quat.w];
+            got.extend(arm.q);
+            got.extend(arm.q_cmd);
+            got.extend([arm.err.mm, arm.err.deg, sim.content.volume()]);
+            for k in 0..got.len() {
+                assert!(
+                    got[k] == r[k + 1] || (got[k] - r[k + 1]).abs() <= 1e-15 * r[k + 1].abs(),
+                    "arm: frame {frame}: {} rust {:e} js {:e}",
+                    names[k],
+                    got[k],
+                    r[k + 1]
+                );
+            }
+        }
+    }
+    assert_eq!(frame, rows.len(), "arm: fixture length");
+    println!("arm: {frame} frames identical to the JS simulation");
 }
 
 #[test]

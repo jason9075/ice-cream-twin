@@ -93,7 +93,8 @@ bowl wall at 3 m/s from five directions, checking every frame that no sample cro
 The arm is the official SO-101 model from
 [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) (`so101_new_calib.urdf`, Apache-2.0).
 `just so101-assets` downloads it at a pinned commit, decimates the meshes to 1.6 MB
-(`public/so101/`, licence included) and generates the kinematic chain (`src/robot/so101-urdf.js`).
+(`public/so101/`, licence included) and generates the kinematic chain (`src/robot/so101-urdf.js`, and the same
+table for Rust in `rust/core/src/robot/urdf.rs`).
 
 - **Placement**: the base stands on the table behind the middle bowl at (0, 0, −0.28) m, facing the
   bowls. In ROS coordinates that is (0, 0.28, 0).
@@ -166,10 +167,14 @@ with the handle pointed at the arm, then parks the arm with a `set_joints`.
 The simulation is also available as a Rust library, `icecream-core`, plus a headless CLI. This is the base
 for a native digital-twin app: direct ROS 2, batch and parallel runs, no browser.
 
-- `core/` is a port of `src/sim/*.js` and `src/math.js`: the spoon controller, the SDF grids, the PBF
-  particles, scooping, the volume ledger and the frames. The WebGPU renderer stays in JS for now.
+- `core/` is a port of `src/sim/*.js`, `src/robot/*.js` and `src/math.js`: the spoon controller, the SDF
+  grids, the PBF particles, scooping, the volume ledger, the frames and the SO-101 (kinematics, tool
+  modules, IK, joint-space leading). `Twin` steps the arm and the sim together like the page does
+  (`arm.constrain` → `sim.step` → `arm.follow`). The WebGPU renderer stays in JS for now.
 - **Bit-for-bit parity with the JS version.** A scripted scoop (510 frames) and two plunge-and-eat cycles
-  (900 frames) produce identical spoon poses, ice volumes, particle counts and ledger values in both. To get
+  (900 frames) produce identical spoon poses, ice volumes, particle counts and ledger values in both. So
+  does an arm-driven run (830 frames: a scoop, a joint command, a move to the next bowl), down to every
+  joint angle, joint command and IK error. To get
   there, the Rust code:
   - stores f32 wherever JS uses a `Float32Array` and does the arithmetic in f64;
   - copies V8's `Math.hypot` algorithm;
@@ -178,18 +183,20 @@ for a native digital-twin app: direct ROS 2, batch and parallel runs, no browser
   - uses the same RNG and hash wrapping.
 - The fixtures are written by `node tools/parity-fixture.mjs` and checked by `cargo test`. CI regenerates
   them with Node 22 (V8 12.4) and fails if they no longer match.
-- The collision tests (no penetration, no tunnelling, sliding along the wall) and the mass-conservation tests
-  are ported too.
+- The collision tests (no penetration, no tunnelling, sliding along the wall), the mass-conservation tests
+  and the arm tests are ported too.
 
 ```bash
-just rust-test     # 13 tests: collision, mass, parity with JS
+just rust-test     # 20 tests: collision, mass, arm, parity with JS
 just parity        # regenerate the JS fixtures, then compare
-just rust-bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g
+just rust-bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame
 just rust-serve    # headless twin over stdin/stdout
 ```
 
 **`icecream serve`** speaks the WebSocket bridge's messages as JSON lines (one object per line), so a ROS node
-or a Python script can run it as a subprocess:
+or a Python script can run it as a subprocess. The SO-101 holds the spoon by default, as on the page:
+`set_target` goes to the closest pose the arm can reach, `set_joints` commands the joints, and every state
+carries the `arm` block. `{"type":"config","arm":false}` frees the spoon.
 
 ```text
 -> {"type":"config","frame":"ros"}
@@ -197,6 +204,9 @@ or a Python script can run it as a subprocess:
 -> {"type":"step","frames":200}
 <- {"type":"state","spoon":{...},"scoopedGrams":11.7,"bowlGrams":{...},"blocked":false,...}
 -> {"type":"eat"}
+-> {"type":"set_joints","joints":[0,-90,50,70,0],"unit":"deg"}
+-> {"type":"step","frames":120}
+<- {"type":"state",...,"arm":{"jointsDeg":[0.0,-90.0,50.0,70.0,0.0],"trackingErrorMm":3e-6,...}}
 ```
 
 ## Files
@@ -218,7 +228,7 @@ src/ui/panel.js        control panel
 src/bridge.js          window.sim and the WebSocket bridge
 tools/                 headless screenshots, WebSocket example controller, parity fixtures,
                        SO-101 asset conversion (so101_assets.py) and jaw-angle sweep (so101_grip.mjs)
-rust/core/             Rust port of the simulation (lib icecream_core) + tests and JS fixtures
+rust/core/             Rust port of the simulation and the arm (lib icecream_core) + tests and JS fixtures
 rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
 ```
 
@@ -228,7 +238,6 @@ rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
   larger scenes `fluid.js` could move to a WebGPU compute shader.
 - Only the spoon is collision-checked. The arm's links aren't, so a deep scoop near the arm can push the
   wrist through a bowl rim.
-- The arm lives in the JS app only. The Rust core (`rust/`) still drives a free-floating spoon.
 - Joint angles follow the URDF convention (radians, zero at the URDF's zero pose). `so101_new_calib` is meant
   to line up with LeRobot's calibration, but check each joint's zero and direction on the real arm before
   streaming angles to it.

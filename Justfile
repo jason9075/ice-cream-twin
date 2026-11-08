@@ -45,7 +45,7 @@ screenshots: build
 ws-example:
     uv run --with websockets tools/ws_example_server.py
 
-# 重新下載並轉換 SO-101 手臂模型（TheRobotStudio/SO-ARM100，Apache-2.0）到 public/so101/
+# 重新下載並轉換 SO-101 手臂模型（TheRobotStudio/SO-ARM100，Apache-2.0）到 public/so101/，並產生 JS 與 Rust 的關節表
 so101-assets:
     uv run --with trimesh --with pymeshlab --with numpy --with scipy --with networkx tools/so101_assets.py
 
@@ -53,7 +53,7 @@ so101-assets:
 so101-grip:
     node tools/so101_grip.mjs
 
-# Rust 核心：單元測試 + 不穿模測試 + 與 JS 逐幀比對（bit-identical）
+# Rust 核心：單元測試 + 不穿模測試 + 手臂測試 + 與 JS 逐幀比對（bit-identical，含手臂）
 rust-test:
     cd rust && cargo test --release
 
@@ -62,11 +62,11 @@ parity:
     node tools/parity-fixture.mjs
     cd rust && cargo test --release --test parity
 
-# Rust 效能測試（挖取 + 三次下挖，印出 ms/frame 與質量）
+# Rust 效能測試（挖取 + 三次下挖 + 手臂挖取，印出 ms/frame 與質量）
 rust-bench:
     cd rust && cargo run --release -q -p icecream-cli -- bench
 
-# 無頭數位孿生：stdin/stdout JSON lines（和 WebSocket 同一套訊息）
+# 無頭數位孿生：stdin/stdout JSON lines（和 WebSocket 同一套訊息，含 SO-101 的 set_joints）
 rust-serve:
     cd rust && cargo run --release -q -p icecream-cli -- serve
 
