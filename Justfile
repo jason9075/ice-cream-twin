@@ -45,6 +45,14 @@ screenshots: build
 ws-example:
     uv run --with websockets tools/ws_example_server.py
 
+# 重新下載並轉換 SO-101 手臂模型（TheRobotStudio/SO-ARM100，Apache-2.0）到 public/so101/
+so101-assets:
+    uv run --with trimesh --with pymeshlab --with numpy --with scipy --with networkx tools/so101_assets.py
+
+# 重新計算夾爪夾住湯匙柄的角度（結果寫在 src/robot/tool.js）
+so101-grip:
+    node tools/so101_grip.mjs
+
 # Rust 核心：單元測試 + 不穿模測試 + 與 JS 逐幀比對（bit-identical）
 rust-test:
     cd rust && cargo test --release

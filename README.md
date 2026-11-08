@@ -1,8 +1,9 @@
 # Ice Cream Twin
 
 An interactive ice-cream scooping page, built as a digital-twin environment for a robot arm. Three bowls
-(vanilla, strawberry, mint chocolate chip) sit on a table. The spoon can be driven by keys, the mouse or an
-external program (WebSocket, optionally in ROS coordinates). **The spoon never passes through a bowl or the
+(vanilla, strawberry, mint chocolate chip) sit on a table, and an **SO-101 arm** behind them holds the spoon.
+The spoon can be driven by keys, the mouse, joint sliders or an external program (WebSocket, optionally in
+ROS coordinates). **The spoon never passes through a bowl or the
 table**, and **Eat** empties whatever is on the spoon.
 
 - Rendering: native **WebGPU** (hand-written WGSL, no three.js), SDF ray marching, shadow map, MSAA.
@@ -15,7 +16,7 @@ table**, and **Eat** empties whatever is on the spoon.
 just install
 just dev           # http://localhost:5173 (needs a WebGPU browser: Chrome / Edge 113+)
 just chrome        # Linux: Chrome ships with WebGPU off; opens a separate profile with the flags on
-just test          # unit tests: collision, scooping, mass conservation, frames (node, no GPU)
+just test          # unit tests: collision, scooping, mass conservation, frames, SO-101 IK (node, no GPU)
 just screenshots   # build, run a scripted scoop headless, write screenshots to shots/
 just verify        # test + build + screenshots
 just               # list all recipes
@@ -87,6 +88,37 @@ The spoon behaves like a speed-limited robot tool tracking a target pose (the tr
 Tested in `tests/collision.test.js`: 120 random target poses (up to 0.6 m/s and 400°/s), and ramming the
 bowl wall at 3 m/s from five directions, checking every frame that no sample crosses the wall.
 
+## Robot arm: SO-101 (`src/robot/`)
+
+The arm is the official SO-101 model from
+[TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) (`so101_new_calib.urdf`, Apache-2.0).
+`just so101-assets` downloads it at a pinned commit, decimates the meshes to 1.6 MB
+(`public/so101/`, licence included) and generates the kinematic chain (`src/robot/so101-urdf.js`).
+
+- **Placement**: the base stands on the table behind the middle bowl at (0, 0, −0.28) m, facing the
+  bowls. In ROS coordinates that is (0, 0.28, 0).
+- **Tool module** (`src/robot/tool.js`): how the spoon is held. Right now the stock gripper's jaw is
+  **locked shut on the spoon handle** at −0.119 rad (−6.8°). The handle lies along the fingers against the
+  fixed jaw's fingertip pad, 10 cm from the handle's end, with the cup opening toward the moving jaw.
+  `just so101-grip` recomputes the jaw angle from the meshes. The real arm will carry a different module
+  (later a 3D-printed spoon holder). Swapping it in means adding one entry to `TOOLS`: the spoon's pose in
+  `gripper_link`, `jaw: null`, `hideJaw: true` and its meshes. Nothing else depends on the gripper.
+- **Inverse kinematics**: damped least squares on the spoon's 6-D pose with joint limits (active set).
+  The SO-101 has 5 joints, so some spoon poses can't be reached. In practice the handle has to point
+  roughly at the arm. In exchange, the scooping curl (wrist flex) and the sideways tilt (wrist roll) are
+  both native.
+- **How it drives the spoon**: the spoon controller still owns contact and the no-penetration guarantee.
+  The arm wraps it:
+  1. Any new target (mouse, jog keys, Go to pose, bridge) becomes the arm's **goal**. This is the
+     closest pose the arm can reach, and it is what the blue ghost shows.
+  2. The spoon is led to the goal **in joint space** (90°/s by default). The command waits while the
+     spoon is held back by ice. This way the spoon only moves through poses the arm can hold. A straight
+     Cartesian line between two reachable poses often isn't one.
+  3. After every step the arm is solved for the spoon's actual pose. Those are the joint angles drawn
+     and reported. The tests check the arm stays within 0.5 mm of the spoon.
+- **Panel**: *Robot arm (SO-101)* has the joint sliders (joint-space command), a switch for the arm, a
+  switch for limiting targets to reach, and the tracking error.
+
 ## Controls
 
 | | |
@@ -110,7 +142,9 @@ y left, z up). The spoon pose's origin is the **centre of the cup's rim**; +X po
 
 ```js
 sim.setTarget({ position: [x, y, z], quaternion: [x, y, z, w], frame: 'ros' });
+sim.setJoints({ joints: [0, -90, 50, 70, 0], unit: 'deg' });  // SO-101: pan, lift, elbow, wrist flex, wrist roll
 sim.getState('ros');   // actual / target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams, grams left per bowl…
+                       // + arm: joints (rad), jointsDeg, goal pose, goalUnreachableMm/Deg, trackingErrorMm…
 sim.eat(); sim.release(); sim.reset(); sim.refill();
 sim.setParams({ fluid: { viscosity: 0.5 }, ice: { hardness: 40 } });
 sim.pause(true); sim.stepFrames(120);    // run the simulation directly, outside the real-time loop
@@ -120,11 +154,12 @@ window.__view.capturePNG(1280, 800);      // offscreen render of one frame (virt
 
 **WebSocket**: the page is the client; the external controller (e.g. a ROS bridge node) is the server.
 
-- Incoming: `set_target`, `eat`, `release`, `reset`, `refill`, `set_params`, `get_state`, `config {frame, rateHz}`
+- Incoming: `set_target`, `set_joints {joints, unit: "rad"|"deg"}`, `eat`, `release`, `reset`, `refill`, `set_params`, `get_state`, `config {frame, rateHz}`
 - Outgoing: `hello` (with the parameters) on connect, then `state` at `rateHz`
 
 Example: `just ws-example` (or `uv run --with websockets tools/ws_example_server.py`), then press Connect
-on the page (or call `sim.connect()`). Using ROS coordinates, it scoops vanilla → eats → scoops mint → eats.
+on the page (or call `sim.connect()`). Using ROS coordinates, it scoops vanilla → eats → scoops mint → eats,
+with the handle pointed at the arm, then parks the arm with a `set_joints`.
 
 ## Rust core (`rust/`)
 
@@ -174,9 +209,15 @@ src/sim/spoon.js       spoon controller (substeps, rigid contact projection, blo
 src/sim/fluid.js       PBF particles
 src/sim/sim.js         scoop / copy / freeze / tip / Eat, volume ledger, stats
 src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
+src/robot/so101.js     SO-101 forward kinematics (chain generated from the URDF in so101-urdf.js)
+src/robot/arm.js       placement, IK, goal projection, joint-space leading of the spoon
+src/robot/tool.js      end-of-arm tool modules (today: gripper clamped on the handle)
+src/robot/render.js    loads public/so101/ and poses the link meshes
+public/so101/          decimated SO-101 meshes + licence (tools/so101_assets.py)
 src/ui/panel.js        control panel
 src/bridge.js          window.sim and the WebSocket bridge
-tools/                 headless screenshots, WebSocket example controller, parity fixtures
+tools/                 headless screenshots, WebSocket example controller, parity fixtures,
+                       SO-101 asset conversion (so101_assets.py) and jaw-angle sweep (so101_grip.mjs)
 rust/core/             Rust port of the simulation (lib icecream_core) + tests and JS fixtures
 rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
 ```
@@ -185,6 +226,12 @@ rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
 
 - The simulation runs on the CPU (about 4–8 ms/frame). Particles are capped at 5000 by default; for much
   larger scenes `fluid.js` could move to a WebGPU compute shader.
+- Only the spoon is collision-checked. The arm's links aren't, so a deep scoop near the arm can push the
+  wrist through a bowl rim.
+- The arm lives in the JS app only. The Rust core (`rust/`) still drives a free-floating spoon.
+- Joint angles follow the URDF convention (radians, zero at the URDF's zero pose). `so101_new_calib` is meant
+  to line up with LeRobot's calibration, but check each joint's zero and direction on the real arm before
+  streaming angles to it.
 - Ice cream doesn't stop the spoon, only slows it down (the cutting force is estimated from hardness × swept
   area, not real mechanics).
 - Solid ice cream doesn't slowly sag once frozen.
