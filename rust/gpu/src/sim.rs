@@ -9,6 +9,7 @@
 //! edited, particles, crumbs) and reads it back.
 
 use crate::layout::{cnt, shader, entry_points, st, stu, Layout, CAP, MAX_SPILLED, PASS_BYTES};
+use icecream_core::fluid::MAX_LUMPS;
 use icecream_core::math::{Quat, Vec3};
 use icecream_core::params::Params;
 use icecream_core::sdf::SPOON;
@@ -612,6 +613,7 @@ impl GpuSim {
         put(28, [f64::from(u8::from(tilt < ip.release_angle - 10.0)), f64::from(u8::from(ip.accretion)), ip.release_angle, tilt]);
         put(48, [sp.lin_vel.x, sp.lin_vel.y, sp.lin_vel.z, 0.0]);
         put(52, [sp.ang_vel.x, sp.ang_vel.y, sp.ang_vel.z, 0.0]);
+        put(60, [fp.lump_stiffness, fp.lump_yield * r, 0.0, 0.0]);
         g[32..36].copy_from_slice(&pose.r0);
         g[36..40].copy_from_slice(&pose.r1);
         g[40..44].copy_from_slice(&pose.r2);
@@ -735,10 +737,22 @@ impl GpuSim {
             self.particles(&mut fr, "scatter", Pass::default());
             self.run(&mut fr, "sortCells", table_groups, Pass::default());
             self.particles(&mut fr, "neighbors", Pass::default());
+            let lumps = self.cpu.params.fluid.lump_stiffness > 0.0;
+            let plastic = Pass { i0: [1, 0, 0, 0], ..Default::default() };
             for _ in 0..iterations {
                 self.particles(&mut fr, "lambdas", Pass::default());
                 self.particles(&mut fr, "deltas", Pass::default());
+                if lumps {
+                    // corrections, then each lump back toward its shape, then the solids
+                    self.particles(&mut fr, "applyDeltas", Pass::default());
+                    self.run(&mut fr, "lumpMatch", MAX_LUMPS as u32, Pass::default());
+                    self.particles(&mut fr, "lumpPull", Pass::default());
+                }
                 self.particles(&mut fr, "applyCollide", Pass::default());
+            }
+            if lumps {
+                self.run(&mut fr, "lumpMatch", MAX_LUMPS as u32, Pass::default());
+                self.particles(&mut fr, "lumpPull", plastic);
             }
             self.particles(&mut fr, "velocities", Pass::default());
             self.particles(&mut fr, "xsph", Pass::default());

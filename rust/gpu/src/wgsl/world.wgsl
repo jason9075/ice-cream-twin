@@ -21,6 +21,8 @@ fn spawnAt(i: u32, p: vec3f, v: vec3f, rgba: u32) {
   X[X_RGBA + i] = rgba;
   X[X_SQ + i] = 0u;
   X[X_ALIVE + i] = 1u;
+  X[X_LUMP + i] = 0u;
+  st3(W_SHAPE, i, p);
 }
 
 // ================================================================ frame start
@@ -328,6 +330,7 @@ fn releaseSpawn(@builtin(global_invocation_id) id: vec3u) {
   let w = toWorld(G.R0, G.R1, G.R2, G.T, intoCup(l));
   let vi = voxelAt(3u, l);
   spawnAt(n0 + ord, w, spoonPointVel(w), X[X_COL + GN[3].w + u32(max(vi, 0))]);
+  X[X_LUMP + n0 + ord] = X[X_STU + SU_lumpNext] % MAX_LUMPS + 1u; // the scoop is one lump
 }
 @compute @workgroup_size(1)
 fn releaseDone() {
@@ -338,6 +341,13 @@ fn releaseDone() {
   let room = u32(max(0.0, min(G.g6.z, f32(CAP)) - f32(n0)));
   atomicStore(&A[A_CNT + C_n], n0 + min(tot, room));
   X[X_STU + SU_released] = 1u;
+  let k = X[X_STU + SU_lumpNext] % MAX_LUMPS + 1u;
+  X[X_STU + SU_lumpNext] = k;
+  let b = W_LUMPS + k * 32u;
+  W[b + 16u] = 0.0;
+  W[b + 17u] = 0.0;
+  W[b + 18u] = 0.0;
+  W[b + 19u] = 1.0;
 }
 // clear the content grid (after a release, or when eating); P.i0.x = 1: only if releaseDone fired
 @compute @workgroup_size(64)
@@ -389,6 +399,8 @@ fn compactScatter(@builtin(global_invocation_id) id: vec3u) {
   X[X_QCONTACT + o] = X[X_CONTACT + i];
   X[X_QREST + o] = X[X_REST + i];
   X[X_QRGBA + o] = X[X_RGBA + i];
+  st3(W_QSHAPE, o, ld3(W_SHAPE, i));
+  X[X_QLUMP + o] = X[X_LUMP + i];
 }
 @compute @workgroup_size(1)
 fn compactCount() {
@@ -409,4 +421,6 @@ fn compactCopy(@builtin(global_invocation_id) id: vec3u) {
   X[X_RGBA + i] = X[X_QRGBA + i];
   X[X_ALIVE + i] = 1u;
   X[X_SQ + i] = 0u;
+  st3(W_SHAPE, i, ld3(W_QSHAPE, i));
+  X[X_LUMP + i] = X[X_QLUMP + i];
 }

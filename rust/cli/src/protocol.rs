@@ -115,6 +115,7 @@ pub fn params_json(p: &Params) -> Value {
         "fluid": {
             "particleRadius": fl.particle_radius, "kernelScale": fl.kernel_scale, "substeps": fl.substeps,
             "iterations": fl.iterations, "gravity": fl.gravity, "viscosity": fl.viscosity, "cohesion": fl.cohesion,
+            "lumpStiffness": fl.lump_stiffness, "lumpYield": fl.lump_yield,
             "damping": fl.damping, "friction": fl.friction, "maxParticles": fl.max_particles, "stopSpeed": fl.stop_speed,
             "restFrames": fl.rest_frames, "stampScale": fl.stamp_scale, "stampSmooth": fl.stamp_smooth,
             "stampOnContact": fl.stamp_on_contact,
@@ -149,6 +150,8 @@ pub fn apply_params(p: &mut Params, patch: &Value) -> Result<(), String> {
                 ("fluid", "gravity") => fl.gravity = num()?,
                 ("fluid", "viscosity") => fl.viscosity = num()?,
                 ("fluid", "cohesion") => fl.cohesion = num()?,
+                ("fluid", "lumpStiffness") => fl.lump_stiffness = num()?.clamp(0.0, 1.0),
+                ("fluid", "lumpYield") => fl.lump_yield = num()?.max(0.0),
                 ("fluid", "damping") => fl.damping = num()?,
                 ("fluid", "friction") => fl.friction = num()?,
                 ("fluid", "maxParticles") => fl.max_particles = num()?.clamp(0.0, 16000.0) as usize,

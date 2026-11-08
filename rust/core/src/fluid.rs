@@ -8,6 +8,10 @@ use crate::math::js_hypot;
 use crate::params::FluidParams;
 
 const MAXN: usize = 48;
+/// Lumps (released scoops) tracked at once; ids 1..=MAX_LUMPS, 0 = a free particle.
+pub const MAX_LUMPS: usize = 8;
+/// a lump with fewer particles than this lets them go free
+const MIN_LUMP: usize = 4;
 /// m/s of outward velocity a contact may produce
 const MAX_SEPARATION: f64 = 0.05;
 const TABLE_BITS: u32 = 16;
@@ -46,6 +50,13 @@ pub struct Fluid {
     pub frame_pos: Vec<f32>,
     /// smoothed net speed over frames (rest detection)
     pub slow: Vec<f32>,
+    /// lump id (0: free)
+    pub lump: Vec<u8>,
+    /// a lump particle's place in the lump's rest shape
+    pub shape: Vec<f32>,
+    /// per lump: rotation from the rest shape (warm start of the polar decomposition), x y z w
+    pub lump_q: [[f64; 4]; MAX_LUMPS + 1],
+    next_lump: u8,
     nbr: Vec<i32>,
     nc: Vec<u8>,
     cell_count: Vec<i32>,
@@ -93,6 +104,10 @@ impl Fluid {
             rgba: vec![0; cap * 4],
             frame_pos: vec![0.0; cap * 3],
             slow: vec![0.0; cap],
+            lump: vec![0; cap],
+            shape: vec![0.0; cap * 3],
+            lump_q: [[0.0, 0.0, 0.0, 1.0]; MAX_LUMPS + 1],
+            next_lump: 0,
             nbr: vec![0; cap * MAXN],
             nc: vec![0; cap],
             cell_count: vec![0; TABLE + 1],
@@ -164,7 +179,22 @@ impl Fluid {
         self.slow[i] = 1.0;
         self.contact[i] = CONTACT_NONE;
         self.rgba[i * 4..i * 4 + 4].copy_from_slice(&rgba);
+        self.lump[i] = 0;
         Some(i)
+    }
+
+    /// A fresh lump id (cycling through MAX_LUMPS).
+    pub fn new_lump(&mut self) -> u8 {
+        self.next_lump = self.next_lump % MAX_LUMPS as u8 + 1;
+        self.lump_q[self.next_lump as usize] = [0.0, 0.0, 0.0, 1.0];
+        self.next_lump
+    }
+
+    /// Make particle i part of lump k, its current position its place in the shape.
+    pub fn set_lump(&mut self, i: usize, k: u8) {
+        self.lump[i] = k;
+        let o = i * 3;
+        self.shape[o..o + 3].copy_from_slice(&[self.pos[o], self.pos[o + 1], self.pos[o + 2]]);
     }
 
     pub fn remove_at(&mut self, i: usize) {
@@ -181,7 +211,9 @@ impl Fluid {
             self.cn[a + k] = self.cn[b + k];
             self.sv[a + k] = self.sv[b + k];
             self.frame_pos[a + k] = self.frame_pos[b + k];
+            self.shape[a + k] = self.shape[b + k];
         }
+        self.lump[i] = self.lump[last];
         self.slow[i] = self.slow[last];
         for k in 0..4 {
             self.rgba[i * 4 + k] = self.rgba[last * 4 + k];
@@ -262,6 +294,97 @@ impl Fluid {
                 }
             }
             self.nc[i] = cnt as u8;
+        }
+    }
+
+    /// Shape matching (Müller et al. 2005) of every lump: find the rotation and translation that best
+    /// map its rest shape onto the particles, then pull each particle `alpha` of the way to its goal.
+    /// With `plastic`, instead move the rest place of a particle further than that from its goal to
+    /// where it is now.
+    pub fn match_lumps(&mut self, alpha: f64, plastic: Option<f64>) {
+        let n = self.n;
+        let mut cnt = [0usize; MAX_LUMPS + 1];
+        let mut sx = [[0.0f64; 3]; MAX_LUMPS + 1];
+        let mut sq = [[0.0f64; 3]; MAX_LUMPS + 1];
+        for i in 0..n {
+            let k = self.lump[i] as usize;
+            if k == 0 {
+                continue;
+            }
+            cnt[k] += 1;
+            for a in 0..3 {
+                sx[k][a] += self.pos[i * 3 + a] as f64;
+                sq[k][a] += self.shape[i * 3 + a] as f64;
+            }
+        }
+        let mut c = [[0.0f64; 3]; MAX_LUMPS + 1];
+        let mut c0 = [[0.0f64; 3]; MAX_LUMPS + 1];
+        let mut m = [[0.0f64; 9]; MAX_LUMPS + 1]; // A = Σ (x - c)(q - c0)^T, row-major
+        for k in 1..=MAX_LUMPS {
+            if cnt[k] > 0 {
+                for a in 0..3 {
+                    c[k][a] = sx[k][a] / cnt[k] as f64;
+                    c0[k][a] = sq[k][a] / cnt[k] as f64;
+                }
+            }
+        }
+        for i in 0..n {
+            let k = self.lump[i] as usize;
+            if k == 0 {
+                continue;
+            }
+            if cnt[k] < MIN_LUMP {
+                self.lump[i] = 0;
+                continue;
+            }
+            for a in 0..3 {
+                let x = self.pos[i * 3 + a] as f64 - c[k][a];
+                for b in 0..3 {
+                    m[k][a * 3 + b] += x * (self.shape[i * 3 + b] as f64 - c0[k][b]);
+                }
+            }
+        }
+        let mut rot = [[0.0f64; 9]; MAX_LUMPS + 1];
+        for k in 1..=MAX_LUMPS {
+            if cnt[k] >= MIN_LUMP {
+                self.lump_q[k] = extract_rotation(&m[k], self.lump_q[k]);
+                rot[k] = quat_mat(self.lump_q[k]);
+            }
+        }
+        for i in 0..n {
+            let k = self.lump[i] as usize;
+            if k == 0 {
+                continue;
+            }
+            let r = &rot[k];
+            let o = i * 3;
+            let q = [
+                self.shape[o] as f64 - c0[k][0],
+                self.shape[o + 1] as f64 - c0[k][1],
+                self.shape[o + 2] as f64 - c0[k][2],
+            ];
+            let mut g = [0.0; 3];
+            for a in 0..3 {
+                g[a] = r[a * 3] * q[0] + r[a * 3 + 1] * q[1] + r[a * 3 + 2] * q[2] + c[k][a];
+            }
+            match plastic {
+                None => {
+                    for a in 0..3 {
+                        let x = self.pos[o + a] as f64;
+                        self.pos[o + a] = (x + alpha * (g[a] - x)) as f32;
+                    }
+                }
+                Some(lim) => {
+                    let e: Vec<f64> = (0..3).map(|a| self.pos[o + a] as f64 - g[a]).collect();
+                    if (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt() > lim {
+                        // the new place: R^T (x - c) + c0
+                        let x: Vec<f64> = (0..3).map(|a| self.pos[o + a] as f64 - c[k][a]).collect();
+                        for b in 0..3 {
+                            self.shape[o + b] = (r[b] * x[0] + r[3 + b] * x[1] + r[6 + b] * x[2] + c0[k][b]) as f32;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -382,8 +505,16 @@ impl Fluid {
                 for k in 0..3 {
                     self.pos[o + k] = (self.pos[o + k] as f64 + self.dp[o + k] as f64) as f32;
                 }
+            }
+            if p.lump_stiffness > 0.0 {
+                self.match_lumps(p.lump_stiffness, None);
+            }
+            for i in 0..n {
                 env.collide(self, i);
             }
+        }
+        if p.lump_stiffness > 0.0 {
+            self.match_lumps(0.0, Some(p.lump_yield * self.r));
         }
 
         // velocities, contact friction
@@ -458,4 +589,56 @@ impl Fluid {
             self.vel[o + 2] = (self.dp[o + 2] as f64 + az * k) as f32;
         }
     }
+}
+
+/// Row-major rotation matrix of a unit quaternion (x, y, z, w).
+pub fn quat_mat(q: [f64; 4]) -> [f64; 9] {
+    let [x, y, z, w] = q;
+    [
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y - w * z),
+        2.0 * (x * z + w * y),
+        2.0 * (x * y + w * z),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z - w * x),
+        2.0 * (x * z - w * y),
+        2.0 * (y * z + w * x),
+        1.0 - 2.0 * (x * x + y * y),
+    ]
+}
+
+/// Rotational part of a 3×3 matrix (row-major), as a quaternion, iterating from `q` (Müller et al. 2016,
+/// "A robust method to extract the rotational part of deformations").
+pub fn extract_rotation(a: &[f64; 9], mut q: [f64; 4]) -> [f64; 4] {
+    for _ in 0..20 {
+        let r = quat_mat(q);
+        let col = |m: &[f64; 9], j: usize| [m[j], m[3 + j], m[6 + j]];
+        let (mut om, mut dn) = ([0.0f64; 3], 0.0f64);
+        for j in 0..3 {
+            let (rc, ac) = (col(&r, j), col(a, j));
+            om[0] += rc[1] * ac[2] - rc[2] * ac[1];
+            om[1] += rc[2] * ac[0] - rc[0] * ac[2];
+            om[2] += rc[0] * ac[1] - rc[1] * ac[0];
+            dn += rc[0] * ac[0] + rc[1] * ac[1] + rc[2] * ac[2];
+        }
+        let s = 1.0 / (dn.abs() + 1e-9);
+        let om = [om[0] * s, om[1] * s, om[2] * s];
+        let w = (om[0] * om[0] + om[1] * om[1] + om[2] * om[2]).sqrt();
+        if w < 1e-9 {
+            break;
+        }
+        let (h, ax) = (0.5 * w, [om[0] / w, om[1] / w, om[2] / w]);
+        let (sh, ch) = (h.sin(), h.cos());
+        let d = [ax[0] * sh, ax[1] * sh, ax[2] * sh, ch];
+        // q = d * q
+        let nq = [
+            d[3] * q[0] + d[0] * q[3] + d[1] * q[2] - d[2] * q[1],
+            d[3] * q[1] - d[0] * q[2] + d[1] * q[3] + d[2] * q[0],
+            d[3] * q[2] + d[0] * q[1] - d[1] * q[0] + d[2] * q[3],
+            d[3] * q[3] - d[0] * q[0] - d[1] * q[1] - d[2] * q[2],
+        ];
+        let l = (nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2] + nq[3] * nq[3]).sqrt();
+        q = [nq[0] / l, nq[1] / l, nq[2] / l, nq[3] / l];
+    }
+    q
 }

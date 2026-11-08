@@ -13,6 +13,12 @@ pub struct FluidParams {
     pub viscosity: f64,
     /// 0..1, pulls neighbours together
     pub cohesion: f64,
+    /// 0..1: how hard a released scoop (a lump) is pulled back to its shape each solver iteration
+    /// (shape matching, Müller et al. 2005). 0: lumps flow like the rest of the fluid.
+    pub lump_stiffness: f64,
+    /// × particle radius: a lump particle pushed further than this from its place in the shape moves its
+    /// place there (plastic flow), so a lump squashes on impact instead of springing back.
+    pub lump_yield: f64,
     /// 1/s
     pub damping: f64,
     /// 0..1 on contacts
@@ -85,6 +91,8 @@ impl Default for FluidParams {
             gravity: 9.81,
             viscosity: 0.35,
             cohesion: 0.25,
+            lump_stiffness: 0.8,
+            lump_yield: 0.6,
             damping: 0.6,
             friction: 0.7,
             max_particles: 5000,

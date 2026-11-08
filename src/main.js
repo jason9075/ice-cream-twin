@@ -253,6 +253,8 @@ async function main() {
     ctl(f, 'fluid', 'particleRadius', 0.0008, 0.0025, 0.0001).name('particle radius (m)');
     ctl(f, 'fluid', 'viscosity', 0, 1, 0.01).name('viscosity (XSPH)');
     ctl(f, 'fluid', 'cohesion', 0, 1, 0.01).name('cohesion / stickiness');
+    ctl(f, 'fluid', 'lumpStiffness', 0, 1, 0.01).name('lump stiffness (0 = flows)');
+    ctl(f, 'fluid', 'lumpYield', 0, 4, 0.05).name('lump yield (× radius)');
     ctl(f, 'fluid', 'friction', 0, 1, 0.01);
     ctl(f, 'fluid', 'damping', 0, 5, 0.05).name('damping (1/s)');
     ctl(f, 'fluid', 'gravity', 0, 20, 0.1).name('gravity (m/s²)');

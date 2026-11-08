@@ -1300,6 +1300,7 @@ impl Sim {
         let fp = self.params.fluid.clone();
         self.fluid.configure(fp.particle_radius, fp.kernel_scale);
         let step = self.fluid.d;
+        let lump = self.fluid.new_lump();
         let (ox, oy, oz, sx, sy, sz) = (self.content.ox, self.content.oy, self.content.oz, self.content.sx, self.content.sy, self.content.sz);
         let mut lz = oz + step / 2.0;
         while lz < oz + sz {
@@ -1322,7 +1323,9 @@ impl Sim {
                         col.copy_from_slice(&self.content.color[vi * 4..vi * 4 + 4]);
                     }
                     self.scratch_c = col;
-                    self.fluid.spawn(w[0], w[1], w[2], v[0], v[1], v[2], col);
+                    if let Some(i) = self.fluid.spawn(w[0], w[1], w[2], v[0], v[1], v[2], col) {
+                        self.fluid.set_lump(i, lump);
+                    }
                     lx += step;
                 }
                 ly += step;

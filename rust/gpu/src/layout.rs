@@ -6,6 +6,7 @@
 //! bins), `PP` (particles packed for streaming) and `PK` (grids packed for streaming); plus the per-frame
 //! globals `G` and per-dispatch parameters `P` (a dynamic offset into one uniform buffer).
 
+use icecream_core::fluid::MAX_LUMPS;
 use icecream_core::sdf::{bowls, BOWL_SPACING, SPOON};
 use icecream_core::Sim;
 use std::collections::BTreeMap;
@@ -103,12 +104,14 @@ pub mod stu {
     pub const SPAWN_LEFT: u32 = 16;
     pub const RELEASED: u32 = 17;
     pub const RELEASING: u32 = 18;
+    /// the last lump id handed out
+    pub const LUMP_NEXT: u32 = 19;
     /// 4 distance + 4 colour "changed this frame" marks (boxes live at 32..64)
     pub const DIRTY: u32 = 64;
-    pub const ALL: [(&str, u32); 11] = [
+    pub const ALL: [(&str, u32); 12] = [
         ("nDebts", N_DEBTS), ("settleFrames", SETTLE_FRAMES), ("residualIdx", RESIDUAL_IDX), ("redistPending", REDIST_PENDING),
         ("rng", RNG), ("frame", FRAME), ("firstColor", FIRST_COLOR), ("spawnLeft", SPAWN_LEFT), ("released", RELEASED),
-        ("releasing", RELEASING), ("dirty", DIRTY),
+        ("releasing", RELEASING), ("lumpNext", LUMP_NEXT), ("dirty", DIRTY),
     ];
 }
 pub mod cnt {
@@ -154,13 +157,14 @@ impl Layout {
             ("POS", 3 * CAP), ("PREV", 3 * CAP), ("VEL", 3 * CAP), ("DP", 3 * CAP), ("CN", 3 * CAP), ("SV", 3 * CAP),
             ("LAM", CAP), ("FPOS", 3 * CAP), ("SLOW", CAP),
             ("QPOS", 3 * CAP), ("QVEL", 3 * CAP), ("QCN", 3 * CAP), ("QSV", 3 * CAP), ("QSLOW", CAP),
+            ("SHAPE", 3 * CAP), ("QSHAPE", 3 * CAP), ("LUMPS", 32 * (MAX_LUMPS as u32 + 1)),
             ("PART", 8192), ("SCANB", 2048), ("SPOS", 3 * MAX_SPILLED), ("DEBTF", 4 * MAX_DEBTS), ("ST", 256),
         ]);
         let x = Sections::new(&[
             ("COL", n), ("FLAG", n), ("LIST", n), ("CSRC", nc), ("CFLAG", nc),
             ("AGE", CAP), ("CONTACT", CAP), ("REST", CAP), ("RGBA", CAP), ("SQ", CAP), ("ALIVE", CAP),
             ("CELL", CAP), ("SORTED", CAP), ("NC", CAP), ("FRZ", CAP), ("IDX", CAP),
-            ("QAGE", CAP), ("QCONTACT", CAP), ("QREST", CAP), ("QRGBA", CAP),
+            ("QAGE", CAP), ("QCONTACT", CAP), ("QREST", CAP), ("QRGBA", CAP), ("LUMP", CAP), ("QLUMP", CAP),
             ("CS", TABLE + 1), ("NB", MAXN * CAP), ("SRGBA", MAX_SPILLED), ("DEBTU", 3 * MAX_DEBTS), ("STU", 256),
             ("SCANU", maxr), ("PRE", maxr), ("BINL", nbins),
         ]);
@@ -205,7 +209,7 @@ impl Layout {
         let h = &SPOON.handle;
         let g = &self.grids;
         s += &format!(
-            "const CAP: u32 = {CAP}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
+            "const CAP: u32 = {CAP}u;\nconst MAX_LUMPS: u32 = {MAX_LUMPS}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
              const MAX_SPILLED: u32 = {MAX_SPILLED}u;\nconst MAX_DEBTS: u32 = {MAX_DEBTS}u;\nconst NBINS: u32 = {}u;\n\
              const BIN: u32 = {BIN}u;\nconst VOL_UNIT: f32 = {};\nconst NC: u32 = {}u;\nconst BIG: f32 = 1e9;\n\n",
             TABLE - 1,
@@ -251,6 +255,7 @@ pub fn shader(l: &Layout) -> String {
         include_str!("wgsl/header.wgsl").to_string(),
         include_str!("wgsl/grid.wgsl").to_string(),
         include_str!("wgsl/fluid.wgsl").to_string(),
+        include_str!("wgsl/lump.wgsl").to_string(),
         include_str!("wgsl/world.wgsl").to_string(),
         include_str!("wgsl/freeze.wgsl").to_string(),
         include_str!("wgsl/ledger.wgsl").to_string(),

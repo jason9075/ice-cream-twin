@@ -317,3 +317,71 @@ fn the_arm_carries_a_gpu_scoop() {
     eprintln!("arm scoop on the GPU: {:.1} g, arm within {worst:.4} mm of the spoon", s.scooped_grams);
     assert!(s.scooped_grams > 10.0 && worst < 0.5);
 }
+
+/// Loose particles near the cup (y above `NEAR`): height (2nd to 98th percentile) and lowest point
+/// (2nd percentile) in metres, how many, and how many are below (in the bowl). From n x (f32 x, y, z, rgba).
+fn loose_extent(bytes: &[u8]) -> (f64, f64, usize, usize) {
+    let mut ys: Vec<f64> = bytes.chunks_exact(16).map(|p| f32::from_le_bytes(p[4..8].try_into().unwrap()) as f64).collect();
+    let below = ys.iter().filter(|&&y| y < NEAR).count();
+    ys.retain(|&y| y >= NEAR);
+    ys.sort_by(f64::total_cmp);
+    if ys.is_empty() {
+        return (0.0, 0.0, 0, below);
+    }
+    let at = |q: f64| ys[((ys.len() - 1) as f64 * q) as usize];
+    (at(0.98) - at(0.02), at(0.02), ys.len(), below)
+}
+const NEAR: f64 = 0.12;
+
+#[test]
+fn a_released_scoop_keeps_its_shape_like_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut c = Sim::default();
+    let b = &bowls()[1];
+    let script = [(Vec3::new(b.cx, 0.14, 0.0), 60), (Vec3::new(b.cx, 0.085, 0.0), 150), (Vec3::new(b.cx, 0.15, 0.0), 120)];
+    for (p, n) in script {
+        drive(&mut g, p, Quat::IDENTITY, n, |_| {});
+        c.set_target(Some(p), Some(Quat::IDENTITY));
+        for _ in 0..n {
+            c.step(1.0 / 60.0);
+        }
+    }
+    let cpu_bytes = |c: &Sim| {
+        let mut out = Vec::new();
+        for i in 0..c.fluid.n {
+            for k in 0..3 {
+                out.extend_from_slice(&c.fluid.pos[i * 3 + k].to_le_bytes());
+            }
+            out.extend_from_slice(&[0; 4]);
+        }
+        out
+    };
+    g.stream = true;
+    g.step(1.0 / 60.0);
+    c.step(1.0 / 60.0);
+    eprintln!("scooped: GPU {:.1} g, CPU {:.1} g", g.state().scooped_grams, c.state().scooped_grams);
+    let g_before = loose_extent(&g.particles).3;
+    let c_before = loose_extent(&cpu_bytes(&c)).3;
+    // tip it out on a level spoon: the scoop (one lump) should sit in the cup, not slump over the rim
+    g.release();
+    c.release();
+    for _ in 0..20 {
+        g.step(1.0 / 60.0);
+        c.step(1.0 / 60.0);
+    }
+    let (gh, glo, gn, gb) = loose_extent(&g.particles);
+    let (ch, clo, cn, cbw) = loose_extent(&cpu_bytes(&c));
+    eprintln!(
+        "released lump after 20 frames: GPU {gn} in the cup, {:.1} mm tall, lowest {:.1} mm, {} more in the bowl; CPU {cn}, {:.1} mm, {:.1} mm, {}",
+        gh * 1e3,
+        glo * 1e3,
+        gb as i64 - g_before as i64,
+        ch * 1e3,
+        clo * 1e3,
+        cbw as i64 - c_before as i64
+    );
+    assert!(gn > 500 && cn > 500);
+    assert!(gh > 0.012 && ch > 0.012, "the lump flattened");
+    assert!(gb <= g_before + 5 && cbw <= c_before + 5, "particles fell through or over the cup");
+    assert!((gh - ch).abs() < 0.3 * ch);
+}

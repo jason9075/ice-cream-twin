@@ -57,7 +57,7 @@ Ice cream exists in two forms that convert into each other:
 | Form | Stored as | When |
 |---|---|---|
 | Solid | one SDF volume per bowl (2.5 mm voxels, 60×56×60), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest |
-| Loose | PBF particles (Position Based Fluids + cohesion + XSPH viscosity + static friction) | crumbs pushed off by the spoon, a scoop sliding off a tilted spoon |
+| Loose | PBF particles (Position Based Fluids + cohesion + XSPH viscosity + static friction); a released scoop is one shape-matched **lump** | crumbs pushed off by the spoon, a scoop sliding off a tilted spoon |
 
 - **Scooping**: the spoon's metal cuts the bowl SDF. Ice inside the cup is **copied** into the spoon's SDF,
   so pressing in and lifting gives a scoop. Ice already on the spoon picks up more ice in the direction of
@@ -69,6 +69,14 @@ Ice cream exists in two forms that convert into each other:
   changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
   freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup.
 - **Tipping**: tilt the spoon past `slide-off tilt` and the scoop turns into particles and falls.
+- **Lumps**: PBF particles alone are a liquid: the density constraint pushes the edges of any pile outward
+  every sub-step, so a released scoop slumped into a puddle and ran over the rim (neither particle friction
+  nor a yield on XSPH stops that; both were tried, `rust/core/examples/pile.rs` shows it). The particles of
+  one release therefore form a lump held by shape matching (Müller et al. 2005): each solver iteration finds
+  the rotation and translation that best map the lump's rest shape onto its particles and pulls them
+  `lump stiffness` of the way back; a particle pushed more than `lump yield` from its place moves its place
+  (plastic flow), so the scoop squashes a little when it lands instead of bouncing back. A dropped scoop
+  falls as a ball and lands as a mound; on a level spoon it stays in the cup. Crumbs stay fluid.
 - **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
   shader renders into the shadow map.
@@ -79,7 +87,7 @@ The whole ice-cream state lives on the GPU: the four SDF volumes (distance + col
 volume ledger sit in a few storage buffers, and each frame is **one submission** of compute passes:
 
 > carve the bowls + copy ice into the scoop (once per spoon sub-step) → carry loose ice with the spoon →
-> tip-out → PBF sub-steps (hash grid, density, collision with every SDF) → freeze resting particles
+> tip-out → PBF sub-steps (hash grid, density, lump shape matching, collision with every SDF) → freeze resting particles
 > (smooth-min stamps) → ledger (owed ice stamped back onto the heap, extra ice shaved off) →
 > volume-preserving smoothing and settling → redistancing the scoop → statistics
 
@@ -268,11 +276,16 @@ first frame, that a scoop sends only patches of the bowl it touched (and the sco
 changed frames earlier), `step` / `eat` replies, and a ROS-frame state stream. `rust/gpu/tests/gpu.rs` runs
 the GPU simulation against the CPU one (table above).
 
+Experiments (`cargo run --release -p icecream-core --example ...`): `pile` drops a cube of particles on a
+floor and prints its height (lumps on or off); `pour` scoops, tips the scoop out and prints how the loose ice
+holds together and the shape of what lands (`RELEASE=1`: released on a level spoon instead).
+
 ## Files
 
 ```
-rust/core/             the simulation (lib icecream_core): spoon controller, SDF grids, PBF particles,
-                       scooping, volume ledger, SO-101 kinematics / IK / tool modules; tests + fixtures
+rust/core/             the simulation (lib icecream_core): spoon controller, SDF grids, PBF particles and
+                       lumps, scooping, volume ledger, SO-101 kinematics / IK / tool modules; tests,
+                       fixtures, examples/ (pile, pour experiments)
 rust/gpu/              the same simulation on the GPU (lib icecream_gpu, wgpu): layout.rs (buffers, the
                        generated WGSL header), sim.rs (the frame), twin.rs (+ SO-101), src/wgsl/ (kernels)
 rust/cli/              `icecream`: web (WebSocket server + static files), serve (stdio JSON lines), bench
