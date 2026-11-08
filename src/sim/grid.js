@@ -26,11 +26,23 @@ export class SdfGrid {
     this.touchedList = new Int32Array(this.n);
     this.touchedVal = new Float32Array(this.n);
     this.nTouched = 0;
+    // bumped on every edit (setting `dirty`), so other consumers (the GPU particle solver) can tell
+    // when to re-upload; `dirty` itself is cleared by the renderer
+    this.version = 0;
     this.dirty = true;
     this.colorDirty = true;
     this.sx = this.nx * cell;
     this.sy = this.ny * cell;
     this.sz = this.nz * cell;
+  }
+
+  get dirty() {
+    return this._dirty;
+  }
+
+  set dirty(v) {
+    this._dirty = v;
+    if (v) this.version++;
   }
 
   clear() {

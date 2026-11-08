@@ -35,7 +35,7 @@ await shot('01-start.png');
 
 // scripted scoop in the strawberry bowl (middle), run headless-fast with stepFrames. The SO-101 stands
 // behind the bowls, so the handle points toward -Z (rotate +90° about Y), then pitch the cup nose-down.
-const state = await page.evaluate(() => {
+const state = await page.evaluate(async () => {
   const s = window.sim;
   s.pause(true);
   const q = (pitch) => {
@@ -47,9 +47,10 @@ const state = await page.evaluate(() => {
     s.setTarget({ position: p, quaternion: quat });
     return s.stepFrames(n);
   };
-  go([0, 0.14, 0.02], q(0.5), 80);
-  go([0, 0.086, 0.015], q(0.5), 150);
-  go([0, 0.088, -0.025], q(0), 150);
+  // stepFrames returns a Promise: with the GPU particle solver every frame waits for the GPU
+  await go([0, 0.14, 0.02], q(0.5), 80);
+  await go([0, 0.086, 0.015], q(0.5), 150);
+  await go([0, 0.088, -0.025], q(0), 150);
   return go([0, 0.15, -0.03], q(0), 100);
 });
 await page.evaluate(() => window.sim.pause(false));
@@ -73,6 +74,20 @@ await page.evaluate(() => {
 });
 await new Promise((r) => setTimeout(r, 500));
 await shot('04-gripper.png');
+
+// tip the scoop back out: loose particles (GPU compute solver by default) pouring into the bowl
+const poured = await page.evaluate(async () => {
+  const s = window.sim;
+  s.pause(true);
+  s.release();
+  window.__view.showParticles(true);
+  const st = await s.stepFrames(24);
+  window.__view.camera.lookFrom({ x: 0.16, y: 0.24, z: 0.2 }, { x: 0, y: 0.1, z: -0.02 });
+  return { particles: st.particles, solver: st.fluidSolver, gpuMs: st.fluidGpuMs };
+});
+await new Promise((r) => setTimeout(r, 300));
+await shot('05-pour.png');
+console.log(`pour: ${poured.particles} loose particles, ${poured.solver} solver, ${poured.gpuMs.toFixed(2)} ms`);
 
 console.log(JSON.stringify({ arm: { joints: state.arm?.jointsDeg?.map((v) => +v.toFixed(1)), errMm: state.arm?.trackingErrorMm }, scoopedGrams: state.scoopedGrams, particles: state.particles, bowls: state.bowlGrams, blocked: state.blocked }, null, 1));
 console.log(errors.length ? errors.join('\n') : 'no console errors');

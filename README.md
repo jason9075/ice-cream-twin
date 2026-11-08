@@ -51,6 +51,20 @@ Ice cream exists in two forms that convert into each other:
   changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
   freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup.
 - **Tipping**: tilt the spoon past `slide-off tilt` and the scoop turns into particles and falls.
+- **Particles on the GPU** (`src/gpu/fluid-gpu.js`): in the page, the PBF solver runs as WebGPU compute
+  shaders, as in Claybook: predict → hash-grid neighbours (count, prefix sum, scatter) → [density + cohesion
+  → collide with the SDFs] × iterations → velocity + contact friction → XSPH. The collision SDFs come along:
+  the table, bowls and spoon metal are ported to WGSL, and the ice grids are uploaded (f32) whenever they
+  change. Spawning, carrying, freezing and the volume ledger stay on the CPU. Each frame the particles are
+  uploaded, every sub-step runs in one submission, and the result is read back.
+  - Same algorithm as the CPU, in f32. From the same state, one sub-step lands 99% of particles within
+    0.15 µm of the CPU's result, with identical contacts. Neighbour lists are built in the CPU's order
+    (each hash cell sorted by particle index), so a run is repeatable on a given GPU.
+  - 15,000 loose particles: about 4.7 ms/frame on the GPU against 135 ms on the CPU. A small pour costs
+    about 2.5 ms more on the GPU than on the CPU, which is the wait for the read-back.
+  - The CPU solver (`src/sim/fluid.js`) stays the reference: node tests and the Rust port follow it bit for
+    bit. Switch with *Fluid → solver*, `?fluid=cpu` or `sim.setFluidSolver('cpu')`.
+    `just fluid-gpu-check` compares the two in headless Chrome.
 - **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
   shader renders into the shadow map.
@@ -144,11 +158,13 @@ y left, z up). The spoon pose's origin is the **centre of the cup's rim**; +X po
 ```js
 sim.setTarget({ position: [x, y, z], quaternion: [x, y, z, w], frame: 'ros' });
 sim.setJoints({ joints: [0, -90, 50, 70, 0], unit: 'deg' });  // SO-101: pan, lift, elbow, wrist flex, wrist roll
-sim.getState('ros');   // actual / target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams, grams left per bowl…
+sim.getState('ros');   // actual / target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams, grams left per bowl,
+                       // particles, fluidSolver ('gpu' | 'cpu'), fluidGpuMs…
                        // + arm: joints (rad), jointsDeg, goal pose, goalUnreachableMm/Deg, trackingErrorMm…
 sim.eat(); sim.release(); sim.reset(); sim.refill();
 sim.setParams({ fluid: { viscosity: 0.5 }, ice: { hardness: 40 } });
-sim.pause(true); sim.stepFrames(120);    // run the simulation directly, outside the real-time loop
+sim.pause(true); await sim.stepFrames(120);  // run outside the real-time loop (a Promise: the GPU solver is awaited)
+sim.setFluidSolver('cpu');                  // particles on the CPU reference solver ('gpu' = compute shaders)
 sim.connect('ws://localhost:8765', 'ros');
 window.__view.capturePNG(1280, 800);      // offscreen render of one frame (virtual camera)
 ```
@@ -216,7 +232,8 @@ src/math.js            vectors / quaternions / matrices (WebGPU 0..1 depth)
 src/sim/sdf.js         analytic SDFs for the bowls, spoon and table; the three flavours
 src/sim/grid.js        narrow-band SDF volume + colour, smooth-min stamping, volume-preserving smoothing
 src/sim/spoon.js       spoon controller (substeps, rigid contact projection, blocked)
-src/sim/fluid.js       PBF particles
+src/sim/fluid.js       PBF particles (CPU reference)
+src/gpu/fluid-gpu.js   the same PBF solver as WebGPU compute shaders (default in the page)
 src/sim/sim.js         scoop / copy / freeze / tip / Eat, volume ledger, stats
 src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
 src/robot/so101.js     SO-101 forward kinematics (chain generated from the URDF in so101-urdf.js)
@@ -234,8 +251,14 @@ rust/cli/              `icecream serve` (JSON lines) and `icecream bench`
 
 ## Known limitations
 
-- The simulation runs on the CPU (about 4–8 ms/frame). Particles are capped at 5000 by default; for much
-  larger scenes `fluid.js` could move to a WebGPU compute shader.
+- Only the particle solver runs on the GPU. Carving, the SDF grids, freezing and the ledger are on the CPU
+  (about 2–6 ms/frame), and the particles make a CPU↔GPU round trip every frame. Next steps toward
+  Claybook: keep the particles on the GPU (render straight from the buffer, read back with a frame of
+  latency), then move stamping and carving into compute shaders. Particles are capped at 5000 by default
+  (*max particles*, up to 15,000).
+- The Rust core has no GPU solver yet: it runs the CPU reference. The WGSL could be shared through wgpu,
+  but GPU results aren't bit-identical, so that path would be checked with tolerances like
+  `tools/fluid-gpu-check.mjs` does.
 - Only the spoon is collision-checked. The arm's links aren't, so a deep scoop near the arm can push the
   wrist through a bowl rim.
 - Joint angles follow the URDF convention (radians, zero at the URDF's zero pose). `so101_new_calib` is meant

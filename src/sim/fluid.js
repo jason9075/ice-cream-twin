@@ -9,10 +9,10 @@
  * into an SDF (Claybook's StampSDFWhenDies), so the particle count stays small.
  */
 
-const MAXN = 48;
+export const MAXN = 48;
 const MAX_SEPARATION = 0.05; // m/s of outward velocity a contact may produce
 const TABLE_BITS = 16;
-const TABLE = 1 << TABLE_BITS;
+export const TABLE = 1 << TABLE_BITS;
 const MASK = TABLE - 1;
 
 export const CONTACT_NONE = 0;

@@ -41,6 +41,16 @@ screenshots: build
     for _ in $(seq 50); do curl -sf http://localhost:4173/ > /dev/null && break; sleep 0.2; done
     node tools/shot.mjs http://localhost:4173/ shots
 
+# 無頭 Chrome（真 GPU）比對粒子求解器：GPU compute shader vs CPU 參考版（單步誤差、完整情境、效能）
+fluid-gpu-check: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./node_modules/.bin/vite preview --port 4173 --strictPort > /dev/null 2>&1 &
+    pid=$!
+    trap 'kill $pid' EXIT
+    for _ in $(seq 50); do curl -sf http://localhost:4173/ > /dev/null && break; sleep 0.2; done
+    node tools/fluid-gpu-check.mjs http://localhost:4173/
+
 # 啟動 WebSocket 範例控制器（ROS 座標；頁面按 Connect 或 sim.connect()）
 ws-example:
     uv run --with websockets tools/ws_example_server.py
@@ -71,7 +81,7 @@ rust-serve:
     cd rust && cargo run --release -q -p icecream-cli -- serve
 
 # 執行完整驗證流程 (JS 測試 + Rust 測試 + 生產建置 + 截圖)
-verify: test rust-test build screenshots
+verify: test rust-test build screenshots fluid-gpu-check
     @echo "✅ 測試、建置與截圖全部完成！"
 
 # 清理建置產物

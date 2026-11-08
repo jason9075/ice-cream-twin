@@ -78,10 +78,18 @@ export function installApi(sim, hooks) {
       hooks.paramsChanged?.();
     },
     getParams: () => JSON.parse(JSON.stringify(sim.params)),
-    /** Run the simulation without rendering (e.g. for fast scripted tests). */
-    stepFrames(n = 1, dt = 1 / 60) {
-      for (let i = 0; i < n; i++) (hooks.step ?? ((t) => sim.step(t)))(dt);
+    /**
+     * Run the simulation without rendering (e.g. for fast scripted tests). Returns a Promise of the
+     * state: with the GPU particle solver every frame waits for the GPU.
+     */
+    async stepFrames(n = 1, dt = 1 / 60) {
+      for (let i = 0; i < n; i++) await (hooks.step ?? ((t) => sim.stepAsync(t)))(dt);
       return api.getState();
+    },
+    /** Particle solver: 'gpu' (WebGPU compute shaders) or 'cpu' (the reference implementation). */
+    setFluidSolver(backend) {
+      if (hooks.fluidSolver) hooks.fluidSolver.backend = backend;
+      return sim.gpuFluid ? 'gpu' : 'cpu';
     },
     /** Pause the real-time loop (stepFrames still works). */
     pause: (v = true) => hooks.pause(v),

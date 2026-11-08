@@ -4,6 +4,7 @@ import { Sim } from './sim/sim.js';
 import { defaultParams } from './sim/params.js';
 import { BOWLS, bowlProfile } from './sim/sdf.js';
 import { createRenderer } from './gpu/renderer.js';
+import { GpuFluid } from './gpu/fluid-gpu.js';
 import { OrbitCamera } from './gpu/camera.js';
 import * as geo from './gpu/geometry.js';
 import { Panel } from './ui/panel.js';
@@ -45,9 +46,20 @@ async function main() {
   // The SO-101 holds the spoon: targets are projected onto what it can reach, and it follows the spoon.
   const arm = new Arm();
   arm.reset(sim);
-  const step = (dt) => {
+  // Particle solver: WebGPU compute (default) or the CPU reference path (?fluid=cpu, or the panel).
+  const gpuFluid = new GpuFluid(r.device, sim);
+  const fluidSolver = {
+    get backend() {
+      return sim.gpuFluid ? 'gpu' : 'cpu';
+    },
+    set backend(v) {
+      sim.gpuFluid = v === 'gpu' ? gpuFluid : null;
+    },
+  };
+  fluidSolver.backend = new URLSearchParams(location.search).get('fluid') === 'cpu' ? 'cpu' : 'gpu';
+  const step = async (dt) => {
     arm.constrain(sim);
-    sim.step(dt);
+    await sim.stepAsync(dt);
     arm.follow(sim);
   };
 
@@ -139,6 +151,7 @@ async function main() {
     pause: (v) => (paused = v),
     step,
     arm,
+    fluidSolver,
   };
   const panel = new Panel(sim, actions);
   let gui;
@@ -156,6 +169,7 @@ async function main() {
   {
     const f = gui.addFolder('Fluid (loose ice cream)');
     const p = params.fluid;
+    f.add(fluidSolver, 'backend', { 'GPU (compute shader)': 'gpu', 'CPU (reference)': 'cpu' }).name('solver');
     f.add(p, 'particleRadius', 0.0008, 0.0025, 0.0001).name('particle radius (m)');
     f.add(p, 'viscosity', 0, 1, 0.01).name('viscosity (XSPH)');
     f.add(p, 'cohesion', 0, 1, 0.01).name('cohesion / stickiness');
@@ -266,7 +280,7 @@ async function main() {
     inst.upload(n);
   }
 
-  function frame(now) {
+  async function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
     fps += (1 / Math.max(dt, 1e-3) - fps) * 0.05;
@@ -275,7 +289,7 @@ async function main() {
       let n = 0;
       while (acc >= STEP && n < 2) {
         panel.applyJog(STEP);
-        step(STEP);
+        await step(STEP);
         acc -= STEP;
         n++;
       }
@@ -327,6 +341,14 @@ async function main() {
     camera,
     arm,
     renderer: r,
+    // internals for headless checks (tools/fluid-gpu-check.mjs)
+    sim,
+    gpuFluid,
+    /** Show or hide the loose particles (View panel). */
+    showParticles(v = true) {
+      particles.visible = v;
+      gui.controllersRecursive().find((c) => c.property === 'particles')?.setValue(v);
+    },
     /** Offscreen render -> PNG data URL (headless tests, virtual camera). */
     async capturePNG(width = 1280, height = 800) {
       const img = await r.capture(scene, camera, light, width, height);
