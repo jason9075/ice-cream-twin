@@ -9,7 +9,7 @@ function totalGrams(sim) {
   const s = sim.getState();
   const fluid = sim.grams(sim.fluid.n * sim.particleVolume());
   const bowls = Object.values(s.bowlGrams).reduce((a, b) => a + b, 0);
-  return bowls + s.scoopedGrams + s.eatenGrams + s.spilledGrams + fluid;
+  return bowls + s.scoopedGrams + s.eatenGrams + s.spilledGrams + fluid + sim.grams(sim.debtVolume());
 }
 
 function runTo(sim, pos, quat, frames) {
@@ -64,4 +64,27 @@ test('tilting past the release angle drops the scoop back as particles', () => {
   assert.ok(sim.getState().scoopedGrams < 0.5, 'scoop should have fallen off');
   for (let f = 0; f < 240; f++) sim.step(1 / 60);
   console.log(`after release: particles left ${sim.fluid.n}`);
+});
+
+test('plunging straight down to the bottom, again and again, keeps the mass', () => {
+  const sim = new Sim();
+  sim.updateStats(true);
+  const before = totalGrams(sim);
+  const B = BOWLS[0];
+  const level = new M.Quaternion();
+  const t0 = performance.now();
+  let frames = 0;
+  for (let k = 0; k < 3; k++) {
+    runTo(sim, new M.Vector3(B.cx, 0.14, 0), level, 60);
+    runTo(sim, new M.Vector3(B.cx, 0.0, 0), level, 240); // as deep as the bowl lets it
+    runTo(sim, new M.Vector3(B.cx, 0.15, 0), level, 150);
+    frames += 450;
+    assert.ok(sim.getState().scoopedGrams > 5, 'each plunge should bring up a scoop');
+    sim.eat();
+  }
+  const after = totalGrams(sim);
+  const ms = (performance.now() - t0) / frames;
+  console.log(`plunge x3: mass ${before.toFixed(1)} -> ${after.toFixed(1)} g, eaten ${sim.getState().eatenGrams.toFixed(1)} g, ${ms.toFixed(2)} ms/frame`);
+  assert.ok(Math.abs(after - before) / before < 0.01, 'mass must be conserved within 1%');
+  assert.ok(sim.spilledVolume <= sim.nSpilled * sim.particleVolume() * 1.01 + 1e-12, 'everything counted as spilled is a visible crumb');
 });

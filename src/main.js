@@ -164,7 +164,8 @@ async function main() {
     s.add(sp, 'maxAngSpeed', 10, 360, 5).name('max ang speed (°/s)');
     s.add(sp, 'maxCutForce', 1, 100, 1).name('max cut force (N)');
     const v = gui.addFolder('View');
-    const view = { ghost: true, samples: false, particles: true };
+    const view = { ghost: true, samples: false, particles: false };
+    particles.visible = view.particles;
     v.add(view, 'ghost').name('target ghost').onChange((x) => (ghost.visible = x));
     v.add(view, 'samples').name('collision samples').onChange((x) => (samples.visible = x));
     v.add(view, 'particles').onChange((x) => (particles.visible = x));

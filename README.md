@@ -1,101 +1,152 @@
 # Ice Cream Twin
 
-挖冰淇淋的互動網頁，給機器手臂數位孿生用。三碗冰淇淋（香草、草莓、薄荷巧克力碎片），湯匙可用按鍵、滑鼠或外部程式（WebSocket／ROS 座標）控制，**湯匙不會穿過碗或桌面**，挖起來的冰淇淋可以按 **Eat** 清空。
+An interactive ice-cream scooping page, built as a digital-twin environment for a robot arm. Three bowls
+(vanilla, strawberry, mint chocolate chip) sit on a table. The spoon can be driven by keys, the mouse or an
+external program (WebSocket, optionally in ROS coordinates). **The spoon never passes through a bowl or the
+table**, and **Eat** empties whatever is on the spoon.
 
-- 渲染：原生 **WebGPU**（手寫 WGSL，沒有 three.js），SDF 光線步進 + shadow map + MSAA。
-- 模擬：純 JS（CPU，確定性），演算法參考 Claybook（見 `~/docs/study/claybook/`）。
-- 依賴：只有 `lil-gui`（參數面板）。`puppeteer-core` 只給 `tools/` 的無頭測試用。
+- Rendering: native **WebGPU** (hand-written WGSL, no three.js), SDF ray marching, shadow map, MSAA.
+- Simulation: plain JavaScript on the CPU (deterministic). The algorithm follows Claybook (notes in
+  `~/docs/study/claybook/`).
+- Dependencies: only `lil-gui` (parameter panel). `puppeteer-core` is used only by the headless tools in
+  `tools/`.
 
 ```bash
 just install
-just dev           # http://localhost:5173 （需要支援 WebGPU 的瀏覽器：Chrome / Edge 113+）
-just chrome        # Linux：Chrome 預設關閉 WebGPU，用這個開一個帶旗標的獨立 profile
-just test          # 碰撞、挖取、座標轉換的單元測試（node，不需要 GPU）
-just screenshots   # 建置 + 無頭跑一次挖取並輸出截圖到 shots/
+just dev           # http://localhost:5173 (needs a WebGPU browser: Chrome / Edge 113+)
+just chrome        # Linux: Chrome ships with WebGPU off; opens a separate profile with the flags on
+just test          # unit tests: collision, scooping, mass conservation, frames (node, no GPU)
+just screenshots   # build, run a scripted scoop headless, write screenshots to shots/
 just verify        # test + build + screenshots
-just               # 列出所有指令
+just               # list all recipes
 ```
 
-推上 GitHub 的 `main` 會由 `.github/workflows/deploy.yml` 跑測試、建置並部署到 GitHub Pages（repo 的 Settings → Pages → Source 要選 **GitHub Actions**）。
+Pushing to `main` runs `.github/workflows/deploy.yml`: tests, build, deploy to GitHub Pages (set the repo's
+Settings → Pages → Source to **GitHub Actions**).
 
-## 演算法（Claybook 式）
+### Browser support
 
-冰淇淋同時有兩種形態，互相轉換：
+WebGPU works out of the box in Chrome / Edge on Windows, macOS, ChromeOS and Android, and in Safari 26.
+**Chrome on Linux** (notably with NVIDIA GPUs) keeps it behind flags, and a page can't change that. Either
+run `just chrome`, or open `chrome://flags`, enable **Unsafe WebGPU Support** and **Vulkan**, and relaunch.
+`chrome://gpu` should then say "WebGPU: Hardware accelerated".
 
-| 形態 | 存放 | 什麼時候 |
+## Algorithm (Claybook-style)
+
+Ice cream exists in two forms that convert into each other:
+
+| Form | Stored as | When |
 |---|---|---|
-| 固體 | 每碗一個 SDF 體積（2.5 mm voxel，60×56×60），湯匙上另有一個跟著湯匙走的 SDF（1.6 mm） | 靜止的冰淇淋 |
-| 流體 | PBF 粒子（Position Based Fluids + 凝聚力 + XSPH 黏性 + 靜摩擦） | 被湯匙擠開的碎屑、傾倒時滑落的那一坨 |
+| Solid | one SDF volume per bowl (2.5 mm voxels, 60×56×60), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest |
+| Loose | PBF particles (Position Based Fluids + cohesion + XSPH viscosity + static friction) | crumbs pushed off by the spoon, a scoop sliding off a tilted spoon |
 
-- **挖**：湯匙金屬部分對碗的 SDF 做 Cut；杯內空間的冰淇淋**複製**進湯匙的 SDF（所以壓進去、拿起來就是一匙）；湯匙上已有的冰淇淋會沿著前進方向再黏上更多（accretion，產生捲起的效果）。被金屬擠開的體積變成粒子。
-- **凝固**：粒子相對接觸面靜止幾幀（或一半陷進冰淇淋裡）就 smooth-min 蓋回 SDF（Claybook 的 `DieWhenStops` + `StampSDFWhenDies`）。
-- **表面張力**：每幀對被編輯的 voxel 做一次**保體積**的 Laplacian 平滑，之後再「沉澱」30 幀，挖起來的冰淇淋會變成圓潤的一球，而且質量守恆。
-- **傾倒**：湯匙傾斜超過 `slide-off tilt`，湯匙上的冰淇淋轉成粒子掉下去。
-- **渲染**：每個 SDF 是一個 3D texture（r8 距離 + rgba8 顏色／碎片量），fragment shader 在代理方塊內 sphere tracing，寫 `frag_depth` 和網格正確遮擋；同一支 shader 也畫進 shadow map。
+- **Scooping**: the spoon's metal cuts the bowl SDF. Ice inside the cup is **copied** into the spoon's SDF,
+  so pressing in and lifting gives a scoop. Ice already on the spoon picks up more ice in the direction of
+  travel (accretion), which gives the curl. Ice pushed aside by the metal becomes particles.
+- **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
+  into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`).
+- **Surface tension**: every frame the edited voxels get one **volume-preserving** Laplacian smoothing pass,
+  then keep "settling" for 30 frames, so a scoop rounds into a ball without losing mass. While the scoop
+  changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
+  freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup.
+- **Tipping**: tilt the spoon past `slide-off tilt` and the scoop turns into particles and falls.
+- **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
+  sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
+  shader renders into the shadow map.
 
-## 湯匙控制與「不穿模」保證（`src/sim/spoon.js`）
+### Mass conservation
 
-湯匙像速度受限的機械手臂工具端，追蹤一個目標姿態（藍色半透明的 ghost）：
+Every transfer is measured in voxel occupancy, and anything that can't be placed at once goes into a
+**volume ledger**:
 
-1. 每幀朝目標前進，線速度／角速度有上限；切冰淇淋時依估計切削力減速。
-2. 這一步切成多個子步，任何碰撞取樣點每子步移動 ≤ 0.8 mm（碗壁 6 mm 厚）→ 不會穿隧。
-3. 每個子步後以 position-based 剛體接觸修正（平移 + 旋轉）把湯匙推出碗和桌面 → 會**沿著碗壁滑動**而不是卡死。
-4. 修正後仍穿透 > 0.2 mm 的子步直接拒絕，湯匙停在上一個合法姿態，回報 `blocked`。取樣點本身比網格胖 0.2 mm，所以畫面上不會看到穿模。
+- ice the cup sweeps through beyond what it actually holds (a full spoon pushed deeper);
+- displaced ice beyond the per-frame particle budget;
+- a particle freezing into ice that is already there;
+- whatever a smoothing pass can't restore.
 
-測試（`tests/collision.test.js`）：120 組隨機目標姿態（含 0.6 m/s、400°/s）、以 3 m/s 朝五個方向硬推穿碗壁，檢查每一幀都沒有任何取樣點越過碗壁。
+Each frame, owed ice is stamped onto the lowest free ice surface near where it went missing, clear of the
+spoon, so displaced ice heaps up around the spoon. Stamps that add too much become credit and are shaved off
+the highest clear peak. Plunging straight to the bottom of a bowl three times conserves the total
+(bowls + spoon + particles + eaten + spilled) to within 0.1 g of 2075 g (`tests/sim.test.js`). Everything
+counted as "spilled" is a visible crumb on the table.
 
-## 操作
+## Spoon control and the no-penetration guarantee (`src/sim/spoon.js`)
+
+The spoon behaves like a speed-limited robot tool tracking a target pose (the translucent blue ghost):
+
+1. Each frame it moves toward the target with capped linear and angular speed, slowing down when the
+   estimated cutting force is high.
+2. That motion is split into substeps so that no collision sample moves more than 0.8 mm per substep (the
+   bowl wall is 6 mm thick), so it can't tunnel.
+3. After every substep a position-based rigid contact projection (translation + rotation) pushes the spoon
+   out of the bowls and the table, so it **slides along the wall** instead of sticking.
+4. A substep that still penetrates more than 0.2 mm after projection is rejected: the spoon stays at the
+   last valid pose and reports `blocked`. Collision samples are 0.2 mm fatter than the mesh, so no
+   interpenetration is ever visible.
+
+Tested in `tests/collision.test.js`: 120 random target poses (up to 0.6 m/s and 400°/s), and ramming the
+bowl wall at 3 m/s from five directions, checking every frame that no sample crosses the wall.
+
+## Controls
 
 | | |
 |---|---|
-| 按住按鈕或鍵盤 | **A/D** X · **R/F** Y · **W/S** Z · **U/O** Rx · **J/L** Ry · **K/I** Rz（World／Tool 座標系可切換） |
-| 滑鼠 | 左鍵拖曳旋轉視角 · 右鍵或 Shift+拖曳平移 · 滾輪縮放 · **Ctrl+拖曳**移動目標（水平面）· **Ctrl+滾輪**目標高度 |
-| 其他 | **E** Eat（清空湯匙）· **H** 回原位 · Tip off（倒掉）· Go to pose（mm／度，XYZ Euler） |
+| Hold a button or key | **A/D** X · **R/F** Y · **W/S** Z · **U/O** Rx · **J/L** Ry · **K/I** Rz (World / Tool frame toggle) |
+| Mouse | left-drag orbit · right-drag or Shift+drag pan · wheel zoom · **Ctrl+drag** move target (horizontal plane) · **Ctrl+wheel** target height |
+| Other | **E** Eat (empty the spoon) · **H** home · Tip off · Go to pose (mm / degrees, XYZ Euler) |
 
-右側面板可即時調整：流體（粒子半徑、黏性、凝聚力、摩擦、阻尼、重力、迭代次數…）、凝固條件、冰淇淋（硬度 kPa、accretion、容量、滑落角度、表面平滑、密度、重新裝填形狀）、湯匙控制器（最大速度、最大切削力）。
+The side panel adjusts everything live: fluid (particle radius, viscosity, cohesion, friction, damping,
+gravity, iterations…), freezing, ice cream (hardness in kPa, accretion, capacity, slide-off angle, surface
+smoothing, density, refill shape) and the spoon controller (max speeds, max cutting force). Under **View**
+you can show the target ghost, the collision samples and the loose particles (hidden by default).
 
-## 數位孿生介面
+## Digital-twin interface
 
-座標：預設是場景的 Y-up（公尺）；指定 `frame: "ros"` 會改用 ROS REP-103（x 前、y 左、z 上）。
-湯匙姿態的原點是**杯口中心**，+X 指向握把，+Y 是杯口朝向。
+Coordinates default to the scene's Y-up frame in metres. Pass `frame: "ros"` for ROS REP-103 (x forward,
+y left, z up). The spoon pose's origin is the **centre of the cup's rim**; +X points toward the handle and
++Y is the direction the cup opens.
 
-**JS API**（`window.sim`）：
+**JS API** (`window.sim`):
 
 ```js
 sim.setTarget({ position: [x, y, z], quaternion: [x, y, z, w], frame: 'ros' });
-sim.getState('ros');   // 實際／目標姿態、速度、contact、blocked、cutForceN、scoopedGrams、eatenGrams、各碗剩餘克數…
+sim.getState('ros');   // actual / target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams, grams left per bowl…
 sim.eat(); sim.release(); sim.reset(); sim.refill();
 sim.setParams({ fluid: { viscosity: 0.5 }, ice: { hardness: 40 } });
-sim.pause(true); sim.stepFrames(120);    // 不經過即時迴圈，直接跑模擬
+sim.pause(true); sim.stepFrames(120);    // run the simulation directly, outside the real-time loop
 sim.connect('ws://localhost:8765', 'ros');
-window.__view.capturePNG(1280, 800);      // 離屏渲染一張畫面（虛擬相機）
+window.__view.capturePNG(1280, 800);      // offscreen render of one frame (virtual camera)
 ```
 
-**WebSocket**：頁面是 client，外部控制器（例如 ROS bridge node）是 server。
+**WebSocket**: the page is the client; the external controller (e.g. a ROS bridge node) is the server.
 
-- 送進來：`set_target`、`eat`、`release`、`reset`、`refill`、`set_params`、`get_state`、`config {frame, rateHz}`
-- 送出去：連上時送 `hello`（含參數），之後以 `rateHz` 送 `state`
+- Incoming: `set_target`, `eat`, `release`, `reset`, `refill`, `set_params`, `get_state`, `config {frame, rateHz}`
+- Outgoing: `hello` (with the parameters) on connect, then `state` at `rateHz`
 
-範例：`uv run --with websockets tools/ws_example_server.py`，然後在頁面按 Connect（或 `sim.connect()`），它會用 ROS 座標挖香草 → 吃 → 挖薄荷 → 吃。
+Example: `just ws-example` (or `uv run --with websockets tools/ws_example_server.py`), then press Connect
+on the page (or call `sim.connect()`). Using ROS coordinates, it scoops vanilla → eats → scoops mint → eats.
 
-## 檔案
+## Files
 
 ```
-src/math.js            向量／四元數／矩陣（WebGPU 0..1 深度）
-src/sim/sdf.js         碗、湯匙、桌面的解析 SDF；三種口味
-src/sim/grid.js        窄帶 SDF 體積 + 顏色、smooth-min 蓋印、保體積平滑
-src/sim/spoon.js       湯匙控制器（子步、剛體接觸投影、blocked）
-src/sim/fluid.js       PBF 粒子
-src/sim/sim.js         挖取／複製／凝固／傾倒／Eat、統計
-src/gpu/               WebGPU renderer、WGSL、幾何、軌道相機
-src/ui/panel.js        控制面板
-src/bridge.js          window.sim 與 WebSocket bridge
-tools/                 無頭截圖、WebSocket 範例控制器
+src/math.js            vectors / quaternions / matrices (WebGPU 0..1 depth)
+src/sim/sdf.js         analytic SDFs for the bowls, spoon and table; the three flavours
+src/sim/grid.js        narrow-band SDF volume + colour, smooth-min stamping, volume-preserving smoothing
+src/sim/spoon.js       spoon controller (substeps, rigid contact projection, blocked)
+src/sim/fluid.js       PBF particles
+src/sim/sim.js         scoop / copy / freeze / tip / Eat, volume ledger, stats
+src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
+src/ui/panel.js        control panel
+src/bridge.js          window.sim and the WebSocket bridge
+tools/                 headless screenshots, WebSocket example controller
 ```
 
-## 已知限制
+## Known limitations
 
-- 模擬在 CPU 上（約 4–6 ms/frame）。粒子上限預設 5000；要更大規模可以把 `fluid.js` 搬到 WebGPU compute shader。
-- 冰淇淋不會擋住湯匙，只會讓它減速（切削力是依硬度 × 掃過面積估計的，不是真實力學）。
-- 固體冰淇淋凝固後不會慢慢下垂。
-- 無頭 Chrome 需要用真 GPU：`--enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan`（這版 Chrome 的 SwiftShader WebGPU 不能 readback）。
+- The simulation runs on the CPU (about 4–8 ms/frame). Particles are capped at 5000 by default; for much
+  larger scenes `fluid.js` could move to a WebGPU compute shader.
+- Ice cream doesn't stop the spoon, only slows it down (the cutting force is estimated from hardness × swept
+  area, not real mechanics).
+- Solid ice cream doesn't slowly sag once frozen.
+- Headless Chrome needs a real GPU: `--enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan`
+  (this Chrome's SwiftShader WebGPU can't read back).

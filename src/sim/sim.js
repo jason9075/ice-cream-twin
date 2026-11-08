@@ -15,15 +15,24 @@ import {
   sdEllipsoid,
   gradLocal,
   smin,
+  sdEnv,
 } from './sdf.js';
 import { defaultParams } from './params.js';
 
 const WORLD_CELL = 0.0025;
-const WORLD_DIMS = [60, 56, 60];
+const WORLD_DIMS = [60, 60, 60];
 const CONTENT_ORIGIN = [-0.032, -0.014, -0.022];
 const CONTENT_CELL = 0.0016;
 const CONTENT_DIMS = [40, 25, 28];
 const MAX_SPILLED = 8000;
+// ice that was removed but not yet put anywhere is re-deposited on the free surface,
+// at most this many stamps per frame (keeps the frame time bounded)
+const DEBT_STAMPS_PER_FRAME = 48;
+const DEBT_MAX_ENTRIES = 256;
+const BOWL_T_HALF = 0.0015;
+// displaced ice becomes at most this many loose particles per frame; the rest goes straight
+// onto the heap through the ledger (same volume, far cheaper than simulating it)
+const DISPLACED_PARTICLES_PER_FRAME = 40;
 
 function srgbToLinear(v) {
   v /= 255;
@@ -50,7 +59,7 @@ export class Sim {
     this.params = params;
     this.flavorRGBA = FLAVORS.map(flavorRGBA);
     this.grids = BOWLS.map(
-      (B) => new SdfGrid([B.cx - 0.075, 0.004, B.cz - 0.075], WORLD_CELL, WORLD_DIMS, 4),
+      (B) => new SdfGrid([B.cx - 0.075, -0.006, B.cz - 0.075], WORLD_CELL, WORLD_DIMS, 4),
     );
     this.content = new SdfGrid(CONTENT_ORIGIN, CONTENT_CELL, CONTENT_DIMS, 4);
     this.spoon = new SpoonController(params.spoon);
@@ -72,6 +81,11 @@ export class Sim {
     this.nSpilled = 0;
     this.spilledVersion = 0;
     this.releasing = false;
+    this._debts = [];
+    this._credit = new Map();
+    this._looseOwed = 0;
+    this._squeezed = new Uint8Array(this.fluid.cap);
+    this._rng = 12345;
     this.fluid.clear();
     this.content.clear();
     // neutral base colour so linear filtering never bleeds black into the scoop's edges
@@ -161,6 +175,7 @@ export class Sim {
 
     // 1. spoon motion, carving the ice along the swept path
     this._removed = 0;
+    this._spawnBudget = DISPLACED_PARTICLES_PER_FRAME;
     sp.p = P.spoon;
     sp.update(dt, this.speedScale, (pp, pq, np, nq, subDt) => this.interact(np, nq, subDt));
     this.interact(sp.pos, sp.quat, dt, true);
@@ -194,13 +209,27 @@ export class Sim {
     this.fluid.markFrame();
     for (let s = 0; s < sub; s++) this.fluid.step(dt / sub, fp, this);
     this.freezeResting(tilt < P.ice.releaseAngle - 10, dt);
+    this.payDebts();
     const sm = P.ice.smoothing;
     for (const g of this.grids) {
       g.smoothTouched(sm);
       g.settle(sm);
+      this._settleResidual(g);
     }
+    const contentEdited = this.content.nTouched > 0;
     this.content.smoothTouched(sm);
-    this.content.settle(sm);
+    // the scoop is small and close to the camera: settle it harder so crumbs that freeze
+    // onto it melt into its surface instead of staying as lumps
+    // rebuild a true distance field every few frames while the scoop is changing: crumbs
+    // that froze on as sub-voxel bumps melt in, and the ray marcher stops overshooting
+    if (contentEdited) this._redistPending = true;
+    if (this._redistPending && this.frame % 3 === 0 && this.contentVolume > 0) {
+      this.content.redistance();
+      this._redistPending = this.content.settleFrames > 0;
+    }
+    for (let k = 0; k < 3; k++) this.content.settle(sm, k === 0);
+    this._clampContent();
+    this._settleResidual(this.content);
 
     this.time += dt;
     this.frame++;
@@ -257,6 +286,7 @@ export class Sim {
       const δ = P.accretionDist;
       let changed = false;
       let wasEmpty = this.contentVolume < 1e-9;
+      let gained = 0;
       for (let k = 0; k < content.nz; k++) {
         const lz = content.oz + (k + 0.5) * c;
         for (let j = 0; j < content.ny; j++) {
@@ -268,7 +298,9 @@ export class Sim {
             const inHullBox = lx > -S.a && lx < S.a && ly > -S.b && ly < 0 && lz > -S.c && lz < S.c;
             // accretion grows the scoop, but never on the outside bottom of the cup
             const below = ly < 0 && sdEllipsoid(lx, ly, lz, S.a + S.t, S.b + S.t, S.c + S.t) > 0;
-            let dR = accrete && !below ? cv - δ : Infinity;
+            // keep the scoop off the walls of its grid, or it gets flat, clipped sides
+            const nearWall = i < 3 || j < 2 || k < 3 || i >= content.nx - 3 || j >= content.ny - 3 || k >= content.nz - 3;
+            let dR = accrete && !below && !nearWall ? cv - δ : Infinity;
             if (inHullBox) dR = Math.min(dR, sdHullInterior(lx, ly, lz));
             if (dR >= c) continue;
             const wx = R[0] * lx + R[1] * ly + R[2] * lz + tx;
@@ -281,6 +313,7 @@ export class Sim {
             // never inside the metal (keeps the rim clean)
             const nv = Math.max(w, dR, -sdSpoonShell(lx, ly, lz));
             if (nv < cv) {
+              gained += content.occ(nv) - content.occ(cv);
               content.data[idx] = nv;
               content.touch(idx);
               changed = true;
@@ -303,6 +336,9 @@ export class Sim {
         content.dirty = true;
         content.colorDirty = true;
       }
+      this._captureBudget = gained * c * c * c;
+    } else {
+      this._captureBudget = 0;
     }
 
     // B. carve the bowls
@@ -311,6 +347,10 @@ export class Sim {
       displaced += this._carveGrid(g, hb, subDt, tilted, accrete, false);
       displaced += this._carveGrid(g, hbHandle, subDt, tilted, accrete, true);
     }
+    // the spoon picked up more than the bowls gave up (resampling between the two grids):
+    // the bowl owes that much back
+    if (this._captureBudget > 0) this._settle(touching[0], 0, 0, 0, -this._captureBudget, _c);
+    this._captureBudget = 0;
   }
 
   _carveGrid(g, box, subDt, tilted, accrete, handleOnly) {
@@ -370,15 +410,24 @@ export class Sim {
           this._removed += dv;
           const isMetal = dS <= dI && dS <= dC;
           const isContentNoAccrete = !isMetal && dC < dI && !accrete;
-          if ((isMetal || isContentNoAccrete) && dv > 0) {
+          if (dv <= 0) continue;
+          if (isMetal || isContentNoAccrete) {
             displacedVol += dv;
             if (toParticles) {
               this._displacedAcc = (this._displacedAcc || 0) + dv;
               while (this._displacedAcc >= vp) {
                 this._displacedAcc -= vp;
-                this._spawnDisplaced(lx, ly, lz, g, idx, handleOnly, pr);
+                if (!this._spawnDisplaced(lx, ly, lz, g, idx, handleOnly, pr)) this._oweAt(g, idx, vp);
               }
+            } else {
+              this._oweAt(g, idx, dv);
             }
+          } else {
+            // swept by the cup: only what was actually copied onto the spoon counts as
+            // scooped; a full cup pushing deeper shoves the rest aside
+            const took = Math.min(dv, this._captureBudget);
+            this._captureBudget -= took;
+            if (dv > took) this._oweAt(g, idx, dv - took);
           }
         }
       }
@@ -388,7 +437,8 @@ export class Sim {
   }
 
   _spawnDisplaced(lx, ly, lz, g, idx, handleOnly, r) {
-    if (this.fluid.n >= this.params.fluid.maxParticles) return;
+    if (this.fluid.n >= this.params.fluid.maxParticles || this._spawnBudget <= 0) return false;
+    this._spawnBudget--;
     const fn = handleOnly ? sdHandle : sdSpoonSolid;
     const d = fn(lx, ly, lz);
     gradLocal(fn, lx, ly, lz, _n);
@@ -400,9 +450,369 @@ export class Sim {
     const wx = R[0] * px + R[1] * py + R[2] * pz + this.tx;
     const wy = R[3] * px + R[4] * py + R[5] * pz + this.ty;
     const wz = R[6] * px + R[7] * py + R[8] * pz + this.tz;
+    // pushed out of the spoon's underside at the bottom of a bowl, the spawn point can land
+    // behind the bowl wall: that ice stays in the bowl (ledger) instead of leaking outside
+    if (sdEnv(wx, wy, wz) < r || !this.gridAt(wx, wy, wz)) return false;
     this.spoon.pointVelocity(wx, wy, wz, _v);
     for (let q = 0; q < 4; q++) _c[q] = g.color[idx * 4 + q];
     this.fluid.spawn(wx, wy, wz, _v[0], _v[1], _v[2], _c);
+    return true;
+  }
+
+  // ------------------------------------------------------------------ volume ledger
+  /** Record `vol` m³ of ice from world-grid voxel `idx` that still has to go somewhere. */
+  _oweAt(g, idx, vol) {
+    const i = idx % g.nx;
+    const j = ((idx / g.nx) | 0) % g.ny;
+    const k = (idx / (g.nx * g.ny)) | 0;
+    for (let q = 0; q < 4; q++) _c[q] = g.color[idx * 4 + q];
+    this._owe(g, g.ox + (i + 0.5) * g.cell, g.oy + (j + 0.5) * g.cell, g.oz + (k + 0.5) * g.cell, vol, _c);
+  }
+
+  /** Record a debt at (x, y, z) in grid `g`'s coordinates (spoon-local for the content grid). */
+  _owe(g, x, y, z, vol, rgba) {
+    if (g === this.content) {
+      // never pile owed ice onto the scoop (it would grow past its capacity into a block):
+      // hand it to the bowl under the spoon, or let it fall as loose particles
+      const R = this.R;
+      this._setPose(this.spoon.pos, this.spoon.quat);
+      const wx = R[0] * x + R[1] * y + R[2] * z + this.tx;
+      const wy = R[3] * x + R[4] * y + R[5] * z + this.ty;
+      const wz = R[6] * x + R[7] * y + R[8] * z + this.tz;
+      const bg = this.grids[nearestBowl(wx).index];
+      if (bg.contains(wx, bg.oy + bg.sy * 0.5, wz, 2 * bg.cell)) {
+        g = bg;
+        x = wx;
+        y = Math.min(wy, bg.oy + bg.sy - 2 * bg.cell);
+        z = wz;
+      } else {
+        this._looseOwed = (this._looseOwed || 0) + vol;
+        const vp = this.particleVolume();
+        while (this._looseOwed >= vp && this.fluid.n < this.params.fluid.maxParticles) {
+          this._looseOwed -= vp;
+          this.fluid.spawn(wx, wy + this.fluid.r * 2, wz, 0, 0, 0, rgba);
+        }
+        return;
+      }
+    }
+    // a previous stamp that added a little more than it owed pays for this first
+    const cr = this._credit.get(g) || 0;
+    if (cr > 0) {
+      const use = Math.min(cr, vol);
+      this._credit.set(g, cr - use);
+      vol -= use;
+      if (vol <= 0) return;
+    }
+    const d = this._debts;
+    const near = 3 * g.cell;
+    for (let n = d.length - 1; n >= Math.max(0, d.length - 8); n--) {
+      const e = d[n];
+      if (e.g === g && Math.abs(e.x - x) < near && Math.abs(e.y - y) < near && Math.abs(e.z - z) < near) {
+        e.vol += vol;
+        return;
+      }
+    }
+    if (d.length >= DEBT_MAX_ENTRIES) {
+      d[d.length - 1].vol += vol;
+      return;
+    }
+    d.push({ g, x, y, z, vol, rgba: Uint8Array.from(rgba), tries: 0 });
+  }
+
+  /**
+   * Where the scoop may never be, in spoon coordinates: under the outside of the cup, and
+   * within two cells of its grid's walls (it would get flat, clipped sides). Precomputed
+   * once as a per-voxel floor; content values are clamped to it every frame.
+   */
+  _clampContent() {
+    const c = this.content;
+    if (!this._contentFloor) {
+      const fl = new Float32Array(c.n);
+      const S = SPOON;
+      const m = 2 * c.cell;
+      for (let k = 0; k < c.nz; k++) {
+        const lz = c.oz + (k + 0.5) * c.cell;
+        for (let j = 0; j < c.ny; j++) {
+          const ly = c.oy + (j + 0.5) * c.cell;
+          for (let i = 0; i < c.nx; i++) {
+            const lx = c.ox + (i + 0.5) * c.cell;
+            // inside-the-allowed-box distance (positive inside)
+            const wall = Math.min(
+              lx - (c.ox + m), c.ox + c.sx - m - lx,
+              ly - (c.oy + m), c.oy + c.sy - m - ly,
+              lz - (c.oz + m), c.oz + c.sz - m - lz,
+            );
+            // forbidden: below the rim plane and outside the cup's outer surface
+            const outer = sdEllipsoid(lx, ly, lz, S.a + S.t, S.b + S.t, S.c + S.t);
+            const sdBelow = Math.max(ly, -outer);
+            fl[i + c.nx * (j + c.ny * k)] = Math.max(-wall, -sdBelow);
+          }
+        }
+      }
+      this._contentFloor = fl;
+    }
+    const fl = this._contentFloor;
+    const d = c.data;
+    let removed = 0;
+    for (let q = 0; q < c.n; q++) {
+      if (d[q] < fl[q]) {
+        removed += c.occ(d[q]) - c.occ(fl[q]);
+        d[q] = fl[q];
+      }
+    }
+    if (removed > 0) {
+      c.residual += removed * c.cell * c.cell * c.cell;
+      c.dirty = true;
+    }
+    this._settleResidual(c);
+  }
+
+  /** Smoothing that couldn't keep its volume hands the difference to the ledger. */
+  _settleResidual(g) {
+    const r = g.takeResidual();
+    if (Math.abs(r) < 1e-12) return;
+    const idx = g.residualIdx;
+    const i = idx % g.nx;
+    const j = ((idx / g.nx) | 0) % g.ny;
+    const k = (idx / (g.nx * g.ny)) | 0;
+    for (let q = 0; q < 4; q++) _c[q] = g.color[idx * 4 + q];
+    this._settle(g, g.ox + (i + 0.5) * g.cell, g.oy + (j + 0.5) * g.cell, g.oz + (k + 0.5) * g.cell, r, _c);
+  }
+
+  /** Signed balance: positive = still owed, negative = a stamp added more than it should. */
+  _settle(g, x, y, z, vol, rgba) {
+    if (g === this.content && vol < 0) {
+      // extra ice on the scoop: the bowl under the spoon gives up that much instead (shaving
+      // the scoop itself would leave pits in it); off any bowl, the loose balance absorbs it
+      this._setPose(this.spoon.pos, this.spoon.quat);
+      const R = this.R;
+      const wx = R[0] * x + R[1] * y + R[2] * z + this.tx;
+      const wz = R[6] * x + R[7] * y + R[8] * z + this.tz;
+      const bg = this.grids[nearestBowl(wx).index];
+      if (bg.contains(wx, bg.oy + bg.sy * 0.5, wz, 2 * bg.cell)) g = bg;
+      else {
+        this._looseOwed += vol;
+        return;
+      }
+    }
+    if (vol > 0) {
+      this._owe(g, x, y, z, vol, rgba);
+      return;
+    }
+    // extra ice first cancels debts still pending in this grid
+    let extra = -vol;
+    const d = this._debts;
+    for (let n = d.length - 1; n >= 0 && extra > 0; n--) {
+      const e = d[n];
+      if (e.g !== g) continue;
+      const use = Math.min(extra, e.vol);
+      e.vol -= use;
+      extra -= use;
+      if (e.vol <= 0) {
+        d[n] = d[d.length - 1];
+        d.pop();
+      }
+    }
+    if (extra > 0) this._credit.set(g, (this._credit.get(g) || 0) + extra);
+  }
+
+  _rand() {
+    this._rng = (this._rng * 1664525 + 1013904223) >>> 0;
+    return this._rng / 4294967296;
+  }
+
+  /** Is (x, y, z) at least `m` away from the spoon (metal and cup opening)? World coords. */
+  _clearOfSpoon(x, y, z, m) {
+    const R = this.R;
+    const rx = x - this.tx;
+    const ry = y - this.ty;
+    const rz = z - this.tz;
+    const lx = R[0] * rx + R[3] * ry + R[6] * rz;
+    const ly = R[1] * rx + R[4] * ry + R[7] * rz;
+    const lz = R[2] * rx + R[5] * ry + R[8] * rz;
+    return sdSpoonSolid(lx, ly, lz) > m && sdHullInterior(lx, ly, lz) > m;
+  }
+
+  /** Is (x, z) under (or inside) the cup + scoop box, above height y? */
+  _underCup(x, y, z, m) {
+    const b = this._cupBox;
+    return x > b[0] - m && x < b[3] + m && z > b[2] - m && z < b[5] + m && b[4] > y;
+  }
+
+  /** Top ice surface of the column through (x, z) in grid g, or NaN when the column has no ice. */
+  _columnTop(g, x, z) {
+    const c = g.cell;
+    for (let y = g.oy + g.sy - c; y > g.oy + c; y -= 0.5 * c) {
+      if (g.sample(x, y, z) < 0) return y;
+    }
+    return NaN;
+  }
+
+  /**
+   * Put owed ice back where it can go: on top of the ice around the spot it went missing,
+   * clear of the spoon (so the heap doesn't get carved again straight away). Every stamp's
+   * real added volume is measured; an overshoot becomes credit against the next debt.
+   * Displaced ice therefore heaps up around the spoon instead of vanishing.
+   */
+  payDebts() {
+    const d = this._debts;
+    this._setPose(this.spoon.pos, this.spoon.quat);
+    const c0 = this.content;
+    // world box of the cup + scoop: no ice is put into a column under it (that would fill
+    // the shaft the spoon just dug, and stack ice onto the spoon)
+    this._cupBox = this._localBoxToWorld(CONTENT_ORIGIN, [
+      CONTENT_ORIGIN[0] + c0.sx,
+      CONTENT_ORIGIN[1] + c0.sy,
+      CONTENT_ORIGIN[2] + c0.sz,
+    ]);
+    let stamps = this._payCredit();
+    if (!d.length) return;
+    const k = this.params.fluid.stampSmooth;
+    for (let n = 0; n < d.length && stamps < DEBT_STAMPS_PER_FRAME; ) {
+      const e = d[n];
+      const g = e.g;
+      const c = g.cell;
+      const rs = Math.min(2.5 * c, Math.max(1.2 * c, Math.cbrt((e.vol * 3) / (2 * Math.PI))));
+      // wait until there is enough owed for a stamp of the minimum size (less churn)
+      if (e.vol < 0.25 * (2 / 3) * Math.PI * rs * rs * rs && e.tries === 0 && stamps > 0) {
+        n++;
+        continue;
+      }
+      let x = NaN, y = NaN, z = NaN;
+      if (g === this.content) {
+        // on the spoon: march up (cup opening) to the free surface, staying out of the metal
+        for (let yy = e.y; yy < g.oy + g.sy - rs; yy += 0.5 * c) {
+          if (g.contains(e.x, yy, e.z, rs) && g.sample(e.x, yy, e.z) >= 0 && sdSpoonShell(e.x, yy, e.z) > rs) {
+            x = e.x; y = yy; z = e.z;
+            break;
+          }
+        }
+      } else {
+        // in a bowl: look along a random horizontal direction from the spot and settle on
+        // the lowest ice top that is clear of the spoon (ice flows into the low spots
+        // instead of stacking into a tower)
+        const a = this._rand() * Math.PI * 2;
+        const dx = Math.cos(a);
+        const dz = Math.sin(a);
+        const Bw = BOWLS[this.grids.indexOf(g)];
+        // stay inside the rim opening, or the heap spills over the rim and down the outside
+        const rimIn = Bw.w - BOWL_T_HALF - rs - c;
+        for (let t = 0; t < 16; t++) {
+          const xx = e.x + dx * t * c;
+          const zz = e.z + dz * t * c;
+          if (!g.contains(xx, g.oy + g.sy * 0.5, zz, rs + c)) break;
+          if (Math.hypot(xx - Bw.cx, zz - Bw.cz) > rimIn) continue;
+          const top = this._columnTop(g, xx, zz);
+          if (!(top === top) || top > g.oy + g.sy - 2 * rs - c) continue;
+          if (!(top < y) && y === y) continue;
+          if (this._underCup(xx, top, zz, rs)) continue;
+          if (this._clearOfSpoon(xx, top, zz, rs + 0.002)) {
+            x = xx; y = top; z = zz;
+          }
+        }
+      }
+      stamps++;
+      e.tries++;
+      // stuck (e.g. owed right at the rim, or the spoon blocks every nearby column): look
+      // for room closer to the middle of the bowl next time
+      if (!(y === y) && g !== this.content && e.tries > 8) {
+        // jump to a random spot inside the bowl that isn't under the spoon
+        const B = BOWLS[this.grids.indexOf(g)];
+        for (let n2 = 0; n2 < 8; n2++) {
+          const a2 = this._rand() * Math.PI * 2;
+          const r2 = Math.sqrt(this._rand()) * (B.w - 0.01);
+          const xx = B.cx + Math.cos(a2) * r2;
+          const zz = B.cz + Math.sin(a2) * r2;
+          if (!this._underCup(xx, -1, zz, rs)) {
+            e.x = xx;
+            e.z = zz;
+            break;
+          }
+        }
+      }
+      if (y === y) {
+        const added = g.stampSphere(x, y, z, rs, k, e.rgba);
+        e.vol -= added;
+      }
+      if (e.vol <= 0) {
+        const over = -e.vol;
+        d[n] = d[d.length - 1];
+        d.pop();
+        if (over > 0) this._settle(g, 0, 0, 0, -over, e.rgba);
+      } else if (e.tries > 600) {
+        this.debtSpilled = (this.debtSpilled || 0) + e.vol;
+        // nowhere to put it (e.g. the bowl is full to the brim): count it as spilled
+        this.spilledVolume += e.vol;
+        d[n] = d[d.length - 1];
+        d.pop();
+      } else {
+        n++;
+      }
+    }
+  }
+
+  /**
+   * Credit = ice that exists in a grid but shouldn't (overshooting stamps, resampling).
+   * Shave it off the highest ice top that is clear of the spoon. Returns stamps used.
+   */
+  _payCredit() {
+    let stamps = 0;
+    for (const [g, cr] of this._credit) {
+      const c = g.cell;
+      const rs = 1.5 * c;
+      const minVol = 0.5 * (2 / 3) * Math.PI * rs * rs * rs;
+      let credit = cr;
+      // only when no debt is pending in this grid (debts consume credit first anyway)
+      if (credit < minVol || this._debts.some((e) => e.g === g)) continue;
+      for (let tries = 0; tries < 6 && credit >= minVol; tries++) {
+        let x = NaN, y = NaN, z = NaN;
+        if (g === this.content) {
+          // spoon: take it from the top of the scoop
+          for (let n = 0; n < 12; n++) {
+            const xx = g.ox + rs + this._rand() * (g.sx - 2 * rs);
+            const zz = g.oz + rs + this._rand() * (g.sz - 2 * rs);
+            for (let yy = g.oy + g.sy - rs; yy > g.oy + rs; yy -= 0.5 * c) {
+              if (g.sample(xx, yy, zz) < 0) {
+                if (!(yy <= y)) { x = xx; y = yy; z = zz; }
+                break;
+              }
+            }
+          }
+        } else {
+          for (let n = 0; n < 12; n++) {
+            const Bw = BOWLS[this.grids.indexOf(g)];
+            const a2 = this._rand() * Math.PI * 2;
+            const r2 = Math.sqrt(this._rand()) * (Bw.w - 0.006);
+            const xx = Bw.cx + Math.cos(a2) * r2;
+            const zz = Bw.cz + Math.sin(a2) * r2;
+            const top = this._columnTop(g, xx, zz);
+            if (!(top === top) || top <= y) continue;
+            if (this._underCup(xx, top, zz, rs)) continue;
+            if (this._clearOfSpoon(xx, top, zz, rs + 0.002)) { x = xx; y = top; z = zz; }
+          }
+        }
+        stamps++;
+        if (!(y === y)) continue;
+        credit -= g.carveSphere(x, y + 0.5 * rs, z, rs);
+      }
+      if (credit < 0) {
+        this._credit.set(g, 0);
+        for (let q = 0; q < 4; q++) _c[q] = 255;
+        this._owe(g, g.ox + g.sx * 0.5, g.oy + g.sy * 0.5, g.oz + g.sz * 0.5, -credit, this.flavorRGBA[this.grids.indexOf(g)] || _c);
+      } else {
+        this._credit.set(g, credit);
+      }
+    }
+    return stamps;
+  }
+
+  /** Ice owed but not yet re-deposited (m³), for mass bookkeeping. */
+  debtVolume() {
+    let v = 0;
+    for (const e of this._debts) v += e.vol;
+    for (const cr of this._credit.values()) v -= cr;
+    v += this._looseOwed || 0;
+    return v;
   }
 
   _localBoxToWorld(min, max) {
@@ -522,6 +932,9 @@ export class Sim {
     }
 
     const R = this.R;
+    const x0 = x;
+    const y0 = y;
+    const z0 = z;
     let rx = x - this.tx;
     let ry = y - this.ty;
     let rz = z - this.tz;
@@ -558,6 +971,14 @@ export class Sim {
       }
     }
 
+    // squeezed between the spoon and the bowl/table: pushing it on would send it through
+    // the wall. Keep it on the bowl's side and merge it into the ice there (freezeResting).
+    if (type === CONTACT_SPOON && sdEnv(x, y, z) < 0.5 * r) {
+      x = x0;
+      y = y0;
+      z = z0;
+      this._squeezed[i] = 1;
+    }
     P[o] = x;
     P[o + 1] = y;
     P[o + 2] = z;
@@ -577,11 +998,20 @@ export class Sim {
     }
   }
 
+  /** Remove particle i (the last one moves into its slot, flags included). */
+  _removeParticle(i) {
+    const last = this.fluid.n - 1;
+    this._squeezed[i] = this._squeezed[last];
+    this._squeezed[last] = 0;
+    this.fluid.removeAt(i);
+  }
+
   /** Claybook's DieWhenStops + StampSDFWhenDies: resting particles freeze into an SDF. */
   freezeResting(allowSpoon, dt) {
     const f = this.fluid;
     const fp = this.params.fluid;
     const rs = fp.stampScale * f.r;
+    const vp = this.particleVolume();
     const R = this.R;
     for (let i = f.n - 1; i >= 0; i--) {
       const o = i * 3;
@@ -589,7 +1019,15 @@ export class Sim {
       const y = f.pos[o + 1];
       const z = f.pos[o + 2];
       if (y < -0.2 || Math.abs(x) > 1 || Math.abs(z) > 1 || !Number.isFinite(x + y + z)) {
-        f.removeAt(i);
+        this._removeParticle(i);
+        continue;
+      }
+      if (this._squeezed[i]) {
+        this._squeezed[i] = 0;
+        const gs = this.gridAt(x, y, z) || this.grids[nearestBowl(x).index];
+        for (let q = 0; q < 4; q++) _c[q] = f.rgba[i * 4 + q];
+        this._owe(gs, x, Math.max(y, gs.oy + gs.cell), z, vp, _c);
+        this._removeParticle(i);
         continue;
       }
       const type = f.contact[i];
@@ -620,16 +1058,20 @@ export class Sim {
         const lx = R[0] * rx + R[3] * ry + R[6] * rz;
         const ly = R[1] * rx + R[4] * ry + R[7] * rz;
         const lz = R[2] * rx + R[5] * ry + R[8] * rz;
-        if (this.content.contains(lx, ly, lz, rs)) {
-          this.content.stampSphere(lx, ly, lz, rs, fp.stampSmooth, _c);
-          f.removeAt(i);
+        const underCup = ly < 0 && sdEllipsoid(lx, ly, lz, SPOON.a + SPOON.t, SPOON.b + SPOON.t, SPOON.c + SPOON.t) > 0;
+        if (!underCup && this.content.contains(lx, ly, lz, rs + 3 * this.content.cell)) {
+          const added = this.content.stampSphere(lx, ly, lz, rs, fp.stampSmooth, _c);
+          this._settle(this.content, lx, ly, lz, vp - added, _c);
+          this._removeParticle(i);
         }
         continue;
       }
       const g = this.gridAt(x, y, z);
       if (g && g.contains(x, y, z, rs + g.cell)) {
-        g.stampSphere(x, y, z, rs, fp.stampSmooth, _c);
-        f.removeAt(i);
+        const added = g.stampSphere(x, y, z, rs, fp.stampSmooth, _c);
+        // merging into ice that is already there adds nothing: re-deposit the difference
+        this._settle(g, x, y, z, vp - added, _c);
+        this._removeParticle(i);
       } else {
         // on the table, outside every bowl volume: keep it as a static crumb
         if (this.nSpilled < MAX_SPILLED) {
@@ -641,7 +1083,7 @@ export class Sim {
           this.spilledVersion++;
         }
         this.spilledVolume += this.particleVolume();
-        f.removeAt(i);
+        this._removeParticle(i);
       }
     }
   }
@@ -716,7 +1158,7 @@ export class Sim {
         (this.content.contains(lx, ly, lz) && sdSpoonSolid(lx, ly, lz) < 0.02);
       if (onSpoon) {
         vol += this.particleVolume();
-        f.removeAt(i);
+        this._removeParticle(i);
       }
     }
     this.eatenVolume += vol;

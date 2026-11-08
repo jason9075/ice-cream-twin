@@ -11,6 +11,8 @@ export class SdfGrid {
     this.oy = origin[1];
     this.oz = origin[2];
     this.cell = cell;
+    this.residual = 0;
+    this.residualIdx = 0;
     this.nx = dims[0];
     this.ny = dims[1];
     this.nz = dims[2];
@@ -116,17 +118,57 @@ export class SdfGrid {
   _writeVolumePreserving(L, T, n) {
     const d = this.data;
     const c = this.cell;
+    const band = this.band;
     let vb = 0;
-    let va = 0;
-    let area = 0;
-    for (let q = 0; q < n; q++) {
-      vb += this.occ(d[L[q]]);
-      const o = this.occ(T[q]);
-      va += o;
-      if (o > 0 && o < 1) area++;
+    for (let q = 0; q < n; q++) vb += this.occ(d[L[q]]);
+    // find the uniform shift that restores the volume (values are T - shift and inside is
+    // negative, so a larger shift means more volume). Volume is monotone and piecewise
+    // linear in the shift: Newton steps kept inside a shrinking bracket converge in a few
+    // passes. Limited to one cell; anything left is reported as residual for the ledger.
+    let lo = -c;
+    let hi = c;
+    let shift = 0;
+    const tol = 0.02;
+    for (let it = 0; it < 8; it++) {
+      let va = 0;
+      let area = 0;
+      for (let q = 0; q < n; q++) {
+        let v = T[q] - shift;
+        if (v > band) v = band;
+        else if (v < -band) v = -band;
+        const o = 0.5 - v / c;
+        if (o >= 1) va += 1;
+        else if (o > 0) {
+          va += o;
+          area++;
+        }
+      }
+      const err = vb - va;
+      if (Math.abs(err) < tol) break;
+      if (err > 0) lo = shift;
+      else hi = shift;
+      let next = area > 0 ? shift + (err * c) / area : NaN;
+      if (!(next > lo && next < hi)) next = 0.5 * (lo + hi);
+      shift = next;
     }
-    const shift = area > 0 ? ((vb - va) * c) / area : 0;
-    for (let q = 0; q < n; q++) d[L[q]] = T[q] - shift;
+    let va = 0;
+    for (let q = 0; q < n; q++) {
+      let v = T[q] - shift;
+      if (v > band) v = band;
+      else if (v < -band) v = -band;
+      d[L[q]] = v;
+      va += this.occ(v);
+    }
+    // volume this pass lost (+) or gained (-), m³, for the caller's ledger
+    this.residual += (vb - va) * c * c * c;
+    if (n) this.residualIdx = L[0];
+  }
+
+  /** Volume the smoothing passes could not restore since the last call, and where. */
+  takeResidual() {
+    const r = this.residual;
+    this.residual = 0;
+    return r;
   }
 
   touch(idx) {
@@ -192,9 +234,9 @@ export class SdfGrid {
    * Keep smoothing the near-surface band of the recently edited region for a few frames
    * after the last edit (the scoop "settles" into a rounded shape instead of staying pitted).
    */
-  settle(strength) {
+  settle(strength, consume = true) {
     if (!this.settleFrames || strength <= 0) return;
-    this.settleFrames--;
+    if (consume) this.settleFrames--;
     const b = this.settleBox;
     const nx = this.nx;
     const ny = this.ny;
@@ -283,9 +325,10 @@ export class SdfGrid {
     const j1 = Math.min(this.ny - 1, Math.floor((cy + reach - this.oy) / c));
     const k0 = Math.max(0, Math.floor((cz - reach - this.oz) / c));
     const k1 = Math.min(this.nz - 1, Math.floor((cz + reach - this.oz) / c));
-    if (i0 > i1 || j0 > j1 || k0 > k1) return false;
+    if (i0 > i1 || j0 > j1 || k0 > k1) return 0;
     const band = this.band;
     let changed = false;
+    let added = 0;
     for (let kk = k0; kk <= k1; kk++) {
       const z = this.oz + (kk + 0.5) * c - cz;
       for (let jj = j0; jj <= j1; jj++) {
@@ -299,6 +342,7 @@ export class SdfGrid {
           let nv = smin(v, ds, k);
           if (nv < -band) nv = -band;
           if (nv < v) {
+            added += this.occ(nv) - this.occ(v);
             this.data[idx] = nv;
             this.touch(idx);
             changed = true;
@@ -311,7 +355,131 @@ export class SdfGrid {
       this.dirty = true;
       if (rgba) this.colorDirty = true;
     }
-    return changed;
+    return added * c * c * c;
+  }
+
+  /**
+   * Rebuild a proper signed distance field from the current zero level set (fast sweeping
+   * Eikonal solver). Copying, carving and stamping leave steep, non-distance values that
+   * make the ray marcher overshoot and the smoothing stall. The volume change it causes is
+   * added to `residual` for the caller's ledger.
+   */
+  redistance() {
+    const { nx, ny, nz, cell: c, band } = this;
+    const n = this.n;
+    const d = this.data;
+    const sxy = nx * ny;
+    const before = this.volume();
+    const u = this._ud || (this._ud = new Float32Array(n));
+    const fixed = this._uf || (this._uf = new Uint8Array(n));
+    const BIG = 1e9;
+    // 1. voxels next to the surface keep their interpolated distance to it
+    for (let k = 0; k < nz; k++)
+      for (let j = 0; j < ny; j++) {
+        let idx = nx * (j + ny * k);
+        for (let i = 0; i < nx; i++, idx++) {
+          const v = d[idx];
+          let best = BIG;
+          const neg = v < 0;
+          for (let m = 0; m < 6; m++) {
+            let w;
+            if (m === 0) { if (i === 0) continue; w = d[idx - 1]; }
+            else if (m === 1) { if (i === nx - 1) continue; w = d[idx + 1]; }
+            else if (m === 2) { if (j === 0) continue; w = d[idx - nx]; }
+            else if (m === 3) { if (j === ny - 1) continue; w = d[idx + nx]; }
+            else if (m === 4) { if (k === 0) continue; w = d[idx - sxy]; }
+            else { if (k === nz - 1) continue; w = d[idx + sxy]; }
+            if (neg !== w < 0) {
+              const t = (Math.abs(v) / (Math.abs(v - w) || 1e-12)) * c;
+              if (t < best) best = t;
+            }
+          }
+          if (best < BIG) {
+            u[idx] = best;
+            fixed[idx] = 1;
+          } else {
+            u[idx] = BIG;
+            fixed[idx] = 0;
+          }
+        }
+      }
+    // 2. fast sweeping in the 8 diagonal orders
+    for (let sweep = 0; sweep < 8; sweep++) {
+      const di = sweep & 1 ? -1 : 1;
+      const dj = sweep & 2 ? -1 : 1;
+      const dk = sweep & 4 ? -1 : 1;
+      for (let kk = 0; kk < nz; kk++) {
+        const k = dk > 0 ? kk : nz - 1 - kk;
+        for (let jj = 0; jj < ny; jj++) {
+          const j = dj > 0 ? jj : ny - 1 - jj;
+          for (let ii = 0; ii < nx; ii++) {
+            const i = di > 0 ? ii : nx - 1 - ii;
+            const idx = i + nx * (j + ny * k);
+            if (fixed[idx]) continue;
+            let a = Math.min(i > 0 ? u[idx - 1] : BIG, i < nx - 1 ? u[idx + 1] : BIG);
+            let b = Math.min(j > 0 ? u[idx - nx] : BIG, j < ny - 1 ? u[idx + nx] : BIG);
+            let e = Math.min(k > 0 ? u[idx - sxy] : BIG, k < nz - 1 ? u[idx + sxy] : BIG);
+            // sort a <= b <= e
+            if (a > b) [a, b] = [b, a];
+            if (b > e) [b, e] = [e, b];
+            if (a > b) [a, b] = [b, a];
+            if (a >= BIG) continue;
+            let x = a + c;
+            if (x > b) {
+              const s2 = a + b;
+              x = 0.5 * (s2 + Math.sqrt(Math.max(0, s2 * s2 - 2 * (a * a + b * b - c * c))));
+              if (x > e) {
+                const s3 = a + b + e;
+                x = (s3 + Math.sqrt(Math.max(0, s3 * s3 - 3 * (a * a + b * b + e * e - c * c)))) / 3;
+              }
+            }
+            if (x < u[idx]) u[idx] = x;
+          }
+        }
+      }
+    }
+    // 3. back to signed, band-limited values
+    for (let q = 0; q < n; q++) {
+      let v = u[q] > band ? band : u[q];
+      d[q] = d[q] < 0 ? -v : v;
+    }
+    this.residual += before - this.volume();
+    this.dirty = true;
+  }
+
+  /** Sharp CSG Cut of a sphere. Returns the removed volume (m³). */
+  carveSphere(cx, cy, cz, R) {
+    const c = this.cell;
+    const reach = R + 2 * c;
+    const i0 = Math.max(0, Math.floor((cx - reach - this.ox) / c));
+    const i1 = Math.min(this.nx - 1, Math.floor((cx + reach - this.ox) / c));
+    const j0 = Math.max(0, Math.floor((cy - reach - this.oy) / c));
+    const j1 = Math.min(this.ny - 1, Math.floor((cy + reach - this.oy) / c));
+    const k0 = Math.max(0, Math.floor((cz - reach - this.oz) / c));
+    const k1 = Math.min(this.nz - 1, Math.floor((cz + reach - this.oz) / c));
+    if (i0 > i1 || j0 > j1 || k0 > k1) return 0;
+    const band = this.band;
+    let removed = 0;
+    for (let kk = k0; kk <= k1; kk++) {
+      const z = this.oz + (kk + 0.5) * c - cz;
+      for (let jj = j0; jj <= j1; jj++) {
+        const y = this.oy + (jj + 0.5) * c - cy;
+        let idx = i0 + this.nx * (jj + this.ny * kk);
+        for (let ii = i0; ii <= i1; ii++, idx++) {
+          const x = this.ox + (ii + 0.5) * c - cx;
+          const v = this.data[idx];
+          let nv = Math.max(v, R - Math.sqrt(x * x + y * y + z * z));
+          if (nv > band) nv = band;
+          if (nv > v) {
+            removed += this.occ(v) - this.occ(nv);
+            this.data[idx] = nv;
+            this.touch(idx);
+          }
+        }
+      }
+    }
+    if (removed > 0) this.dirty = true;
+    return removed * c * c * c;
   }
 
   /** Quantise into the 8-bit texture: [-band, band] -> [0, 255]. */
