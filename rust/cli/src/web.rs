@@ -1,6 +1,7 @@
 //! `icecream web`: the simulation runs here, browsers only draw it.
 //!
-//! - One thread owns the [`Twin`] and steps it in real time (60 Hz) unless paused. After every step (or
+//! - One thread owns the simulation ([`Engine`]: on the GPU when there is one, else the CPU) and steps it
+//!   in real time (60 Hz) unless paused. After every step (or
 //!   command, while paused) it publishes a [`Snapshot`]: state, poses, particles and the SDF grids
 //!   quantised the way the renderer's 3D textures store them.
 //! - `GET /ws` is a WebSocket. Commands are the JSON messages of [`crate::protocol`] plus `config`
@@ -20,7 +21,8 @@
 //! u32 patches, each: u32 grid, u32 kind (0 distance r8, 1 colour rgba8), u32 x0 y0 z0, u32 sx sy sz, bytes, pad
 //! ```
 
-use crate::protocol::{frame_of, handle, params_json, scene_json, state_json, Frame};
+use crate::engine::{open, Engine};
+use crate::protocol::{frame_of, handle, scene_json, state_json_kind, Frame};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State as AxState;
 use axum::response::IntoResponse;
@@ -28,7 +30,7 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use icecream_core::robot::ArmState;
-use icecream_core::{State, Twin};
+use icecream_core::State;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -48,6 +50,7 @@ pub struct GridSnap {
 
 pub struct Snapshot {
     pub seq: u64,
+    pub kind: &'static str,
     pub paused: bool,
     pub state: State,
     pub arm: ArmState,
@@ -84,72 +87,56 @@ fn pose7(p: [f64; 3], q: [f64; 4]) -> [f32; 7] {
     [p[0] as f32, p[1] as f32, p[2] as f32, q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]
 }
 
-fn particle_bytes(pos: &[f32], rgba: &[u8], n: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(n * 16);
-    for i in 0..n {
-        for k in 0..3 {
-            out.extend_from_slice(&pos[i * 3 + k].to_le_bytes());
-        }
-        out.extend_from_slice(&rgba[i * 4..i * 4 + 4]);
-    }
-    out
-}
-
 impl Publisher {
-    fn new(t: &mut Twin) -> Self {
-        let mut p = Publisher { seq: 0, grids: Vec::new(), spilled_ver: u64::MAX, spilled: Arc::new(Vec::new()) };
-        for k in 0..4 {
-            let g = if k < 3 { &mut t.sim.grids[k] } else { &mut t.sim.content };
-            g.pack();
-            g.dirty = false;
-            g.color_dirty = false;
-            p.grids.push(GridSnap { dims: [g.nx, g.ny, g.nz], dist_ver: 0, dist: Arc::new(g.bytes.clone()), col_ver: 0, color: Arc::new(g.color.clone()) });
-        }
-        p
+    fn new(t: &mut dyn Engine) -> Self {
+        let v = t.view();
+        let grids = v
+            .grids
+            .iter()
+            .map(|g| GridSnap { dims: g.dims, dist_ver: 0, dist: Arc::new(g.dist.to_vec()), col_ver: 0, color: Arc::new(g.color.to_vec()) })
+            .collect();
+        Publisher { seq: 0, grids, spilled_ver: u64::MAX, spilled: Arc::new(Vec::new()) }
     }
 
-    fn snapshot(&mut self, t: &mut Twin, paused: bool) -> Arc<Snapshot> {
+    fn snapshot(&mut self, t: &mut dyn Engine, paused: bool) -> Arc<Snapshot> {
         self.seq += 1;
-        for k in 0..4 {
-            let g = if k < 3 { &mut t.sim.grids[k] } else { &mut t.sim.content };
-            let s = &mut self.grids[k];
-            if g.dirty {
-                g.pack();
-                g.dirty = false;
-                s.dist = Arc::new(g.bytes.clone());
-                s.dist_ver += 1;
-            }
-            if g.color_dirty {
-                g.color_dirty = false;
-                s.color = Arc::new(g.color.clone());
-                s.col_ver += 1;
-            }
-        }
-        let sim = &t.sim;
-        if sim.spilled_version != self.spilled_ver {
-            self.spilled_ver = sim.spilled_version;
-            self.spilled = Arc::new(particle_bytes(&sim.spilled, &sim.spilled_rgba, sim.n_spilled));
-        }
-        let state = sim.state();
-        let arm = t.arm.state();
-        let ghost = if t.arm.enabled {
-            pose7(t.arm.goal.pos.to_array(), t.arm.goal.quat.to_array())
+        let state = t.state();
+        let arm = t.arm().state();
+        let kind = t.kind();
+        let ghost = if t.arm().enabled {
+            pose7(t.arm().goal.pos.to_array(), t.arm().goal.quat.to_array())
         } else {
-            pose7(sim.spoon.target_pos.to_array(), sim.spoon.target_quat.to_array())
+            pose7(state.target_position, state.target_quaternion)
         };
         let mut links = [[0f32; 16]; 8];
-        for (k, m) in t.arm.link_matrices().iter().enumerate() {
+        for (k, m) in t.arm().link_matrices().iter().enumerate() {
             for (o, v) in links[k].iter_mut().zip(m.iter()) {
                 *o = *v as f32;
             }
         }
+        let v = t.view();
+        for (s, g) in self.grids.iter_mut().zip(&v.grids) {
+            if g.dist_changed {
+                s.dist = Arc::new(g.dist.to_vec());
+                s.dist_ver += 1;
+            }
+            if g.color_changed {
+                s.color = Arc::new(g.color.to_vec());
+                s.col_ver += 1;
+            }
+        }
+        if v.spilled_version != self.spilled_ver {
+            self.spilled_ver = v.spilled_version;
+            self.spilled = Arc::new(v.spilled);
+        }
         Arc::new(Snapshot {
             seq: self.seq,
+            kind,
             paused,
             spoon: pose7(state.spoon_position, state.spoon_quaternion),
             ghost,
             links,
-            particles: Arc::new(particle_bytes(&sim.fluid.pos, &sim.fluid.rgba, sim.fluid.n)),
+            particles: Arc::new(v.particles),
             spilled_ver: self.spilled_ver,
             spilled: self.spilled.clone(),
             grids: self
@@ -163,7 +150,7 @@ impl Publisher {
     }
 }
 
-fn run_sim(mut twin: Twin, rx: mpsc::Receiver<Cmd>, tx: watch::Sender<Arc<Snapshot>>, mut pub_: Publisher, mut paused: bool) {
+fn run_sim(mut twin: Box<dyn Engine>, rx: mpsc::Receiver<Cmd>, tx: watch::Sender<Arc<Snapshot>>, mut pub_: Publisher, mut paused: bool) {
     let dt = Duration::from_secs_f64(DT);
     let mut next = Instant::now() + dt;
     loop {
@@ -176,7 +163,7 @@ fn run_sim(mut twin: Twin, rx: mpsc::Receiver<Cmd>, tx: watch::Sender<Arc<Snapsh
                     next = Instant::now() + dt;
                     Ok(Some(json!({ "type": "paused", "paused": paused })))
                 } else {
-                    handle(&mut twin, &cmd.msg, cmd.frame)
+                    handle(twin.as_mut(), &cmd.msg, cmd.frame)
                 };
                 // while running the next tick publishes; while paused every command shows at once
                 let r = r.map(|v| {
@@ -188,7 +175,7 @@ fn run_sim(mut twin: Twin, rx: mpsc::Receiver<Cmd>, tx: watch::Sender<Arc<Snapsh
                     })
                 });
                 if paused {
-                    let _ = tx.send(pub_.snapshot(&mut twin, paused));
+                    let _ = tx.send(pub_.snapshot(twin.as_mut(), paused));
                 }
                 let _ = cmd.reply.send(r);
             }
@@ -201,7 +188,7 @@ fn run_sim(mut twin: Twin, rx: mpsc::Receiver<Cmd>, tx: watch::Sender<Arc<Snapsh
             if Instant::now() > next + Duration::from_millis(100) {
                 next = Instant::now() + dt; // fell behind: don't try to catch up
             }
-            let _ = tx.send(pub_.snapshot(&mut twin, paused));
+            let _ = tx.send(pub_.snapshot(twin.as_mut(), paused));
         }
     }
 }
@@ -271,7 +258,7 @@ fn render_frame(s: &Snapshot, view: &mut ClientView) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 * 1024);
     put_u32(&mut out, MAGIC);
     put_u32(&mut out, s.seq as u32);
-    let mut st = state_json(&s.state, Some(&s.arm), Frame::Yup);
+    let mut st = state_json_kind(&s.state, Some(&s.arm), Frame::Yup, s.kind);
     st["seq"] = json!(s.seq);
     st["paused"] = json!(s.paused);
     let js = st.to_string();
@@ -418,7 +405,7 @@ async fn client(socket: WebSocket, sh: Arc<Shared>) {
             },
             _ = tick.tick(), if mode == Stream::State => {
                 let s = snap_rx.borrow().clone();
-                let mut st = state_json(&s.state, Some(&s.arm), frame);
+                let mut st = state_json_kind(&s.state, Some(&s.arm), frame, s.kind);
                 st["seq"] = json!(s.seq);
                 if sink.send(Message::Text(st.to_string())).await.is_err() { break; }
             },
@@ -438,15 +425,17 @@ pub struct Options {
     pub port: u16,
     pub dist: Option<PathBuf>,
     pub paused: bool,
+    /// run the simulation on the CPU even when there is a GPU
+    pub cpu: bool,
 }
 
 /// Bind, start the simulation thread, and return the address and the server future.
 pub async fn start(opts: Options) -> std::io::Result<(std::net::SocketAddr, impl std::future::Future<Output = std::io::Result<()>>)> {
-    let mut twin = Twin::default();
-    let scene = scene_json(&twin);
-    let _ = params_json(&twin.sim.params);
-    let mut publisher = Publisher::new(&mut twin);
-    let first = publisher.snapshot(&mut twin, opts.paused);
+    let mut twin = open(opts.cpu);
+    twin.set_streaming(true);
+    let scene = scene_json(twin.as_ref());
+    let mut publisher = Publisher::new(twin.as_mut());
+    let first = publisher.snapshot(twin.as_mut(), opts.paused);
     let (snap_tx, snap_rx) = watch::channel(first);
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let paused = opts.paused;

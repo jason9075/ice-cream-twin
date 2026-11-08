@@ -1,12 +1,13 @@
 //! Headless ice-cream digital twin.
 //!
 //! ```text
-//! icecream web [--port 8765] [--dist DIR] [--paused]
+//! icecream web [--port 8765] [--dist DIR] [--paused] [--cpu]
 //!                       the simulation as a server: browsers draw it over a WebSocket (/ws), and
-//!                       --dist serves the built page too (see web.rs for the protocol)
-//! icecream serve        JSON lines on stdin -> JSON lines on stdout (same commands; for ROS nodes,
-//!                       Python, test rigs)
-//! icecream bench        run the scoop + plunge scenarios, print ms/frame and mass drift
+//!                       --dist serves the built page too (see web.rs for the protocol). Runs on the
+//!                       GPU when there is one (wgpu), --cpu forces the CPU version
+//! icecream serve [--gpu] JSON lines on stdin -> JSON lines on stdout (same commands; for ROS nodes,
+//!                       Python, test rigs); CPU by default
+//! icecream bench        the scoop + plunge scenarios on the CPU, and a scoop on the GPU if there is one
 //! ```
 //!
 //! Commands are listed in protocol.rs. `serve` also takes `{"type":"config","frame":"ros","arm":true}`:
@@ -21,8 +22,8 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
-fn serve() {
-    let mut twin = Twin::default();
+fn serve(gpu: bool) {
+    let mut twin = icecream_cli::engine::open(!gpu);
     let mut default_frame = Frame::Yup;
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
@@ -40,9 +41,9 @@ fn serve() {
                 if let Some(on) = msg.get("arm").and_then(|a| a.as_bool()) {
                     twin.set_arm_enabled(on);
                 }
-                Some(twin_state(&twin, default_frame))
+                Some(twin_state(twin.as_ref(), default_frame))
             }
-            Ok(msg) => match handle(&mut twin, &msg, default_frame) {
+            Ok(msg) => match handle(twin.as_mut(), &msg, default_frame) {
                 Ok(r) => r,
                 Err(e) => Some(json!({ "type": "error", "message": e })),
             },
@@ -112,16 +113,45 @@ fn bench() {
         dt * 1000.0 / n as f64,
         twin.sim.state().scooped_grams
     );
+
+    // the same on the GPU simulation
+    match icecream_gpu::GpuTwin::new(icecream_core::Params::default()) {
+        Err(e) => println!("GPU: none ({e})"),
+        Ok(mut g) => {
+            let t0 = Instant::now();
+            let mut worst = 0f64;
+            for (p, pitch, frames) in [
+                (Vec3::new(0.0, 0.14, 0.02), 0.5, 80),
+                (Vec3::new(0.0, 0.086, 0.015), 0.5, 150),
+                (Vec3::new(0.0, 0.088, -0.025), 0.0, 150),
+                (Vec3::new(0.0, 0.15, -0.03), 0.0, 100),
+            ] {
+                g.sim.cpu.spoon.set_target(Some(p), Some(face(pitch)));
+                for _ in 0..frames {
+                    g.step(1.0 / 60.0);
+                    worst = worst.max(g.arm.err.mm);
+                }
+            }
+            let dt = t0.elapsed().as_secs_f64();
+            println!(
+                "arm scoop on the GPU ({}): {:.2} ms/frame, scooped {:.1} g, arm within {worst:.4} mm",
+                g.sim.adapter,
+                dt * 1000.0 / 480.0,
+                g.sim.state().scooped_grams
+            );
+        }
+    }
 }
 
 fn web(args: &[String]) {
-    let mut opts = web::Options { port: 8765, dist: None, paused: false };
+    let mut opts = web::Options { port: 8765, dist: None, paused: false, cpu: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--port" => opts.port = it.next().and_then(|p| p.parse().ok()).expect("--port N"),
             "--dist" => opts.dist = Some(it.next().expect("--dist DIR").into()),
             "--paused" => opts.paused = true,
+            "--cpu" => opts.cpu = true,
             other => {
                 eprintln!("unknown option {other}");
                 std::process::exit(2);
@@ -145,10 +175,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("web") => web(&args[2..]),
-        Some("serve") => serve(),
+        Some("serve") => serve(args.iter().any(|a| a == "--gpu")),
         Some("bench") => bench(),
         _ => {
-            eprintln!("usage: icecream web [--port N] [--dist DIR] [--paused] | serve | bench");
+            eprintln!("usage: icecream web [--port N] [--dist DIR] [--paused] [--cpu] | serve [--gpu] | bench");
             std::process::exit(2);
         }
     }

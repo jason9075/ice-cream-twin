@@ -10,7 +10,7 @@ default:
 install:
     npm install
 
-# 開發：啟動 Rust 模擬伺服器（ws://localhost:8765/ws）+ Vite 前端（http://localhost:5173，/ws 代理到伺服器）
+# 開發：啟動 Rust 模擬伺服器（GPU 模擬，ws://localhost:8765/ws）+ Vite 前端（http://localhost:5173，/ws 代理到伺服器）
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -20,9 +20,9 @@ dev:
     trap 'kill $pid' EXIT
     npm run dev
 
-# 只啟動 Rust 模擬伺服器（給外部控制器或另開的前端用）
-server port="8765":
-    cd rust && cargo run --release -q -p icecream-cli -- web --port {{port}}
+# 只啟動 Rust 模擬伺服器（給外部控制器或另開的前端用；有 GPU 就用 GPU，加 --cpu 改用 CPU）
+server *flags:
+    cd rust && cargo run --release -q -p icecream-cli -- web --port 8765 {{flags}}
 
 # 用開啟 WebGPU 的獨立 Chrome profile 開啟頁面（Linux 預設關閉 WebGPU；請先在另一個終端機跑 just dev）
 chrome url="http://localhost:5173/":
@@ -37,7 +37,7 @@ build:
 serve port="8765": build
     cd rust && cargo run --release -q -p icecream-cli -- web --port {{port}} --dist ../dist
 
-# Rust 測試：碰撞不穿模、質量守恆、手臂、凍結對照資料回歸、WebSocket 伺服器端到端
+# Rust 測試：碰撞不穿模、質量守恆、手臂、凍結對照資料回歸、GPU 對 CPU 比對（沒有 GPU 會略過）、WebSocket 伺服器端到端
 test:
     cd rust && cargo test --release
 
@@ -60,7 +60,7 @@ ws-example url="ws://localhost:8765/ws":
 so101-assets:
     uv run --with trimesh --with pymeshlab --with numpy --with scipy --with networkx tools/so101_assets.py
 
-# Rust 效能測試（挖取 + 三次下挖 + 手臂挖取，印出 ms/frame 與質量）
+# 效能測試：CPU 版挖取 + 三次下挖 + 手臂挖取，再跑一次 GPU 版的手臂挖取
 bench:
     cd rust && cargo run --release -q -p icecream-cli -- bench
 

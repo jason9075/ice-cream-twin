@@ -5,13 +5,15 @@ chocolate chip) sit on a table, and an **SO-101 arm** behind them holds the spoo
 keys, the mouse, joint sliders or an external program (WebSocket, optionally in ROS coordinates). **The
 spoon never passes through a bowl or the table**, and **Eat** empties whatever is on the spoon.
 
-**The simulation runs in a Rust server; the web page only draws it.**
+**The simulation runs in a Rust server, on its GPU (wgpu compute shaders, Claybook-style); the web page
+only draws it.**
 
 ```
  icecream web (Rust, rust/cli)                                     browser (src/)
  ┌─────────────────────────────────────────────┐   /ws (binary)   ┌──────────────────────────────┐
- │ simulation thread, 60 Hz: spoon, ice cream, │ ───────────────▶ │ WebGPU renderer: SDF ray     │
- │ particles, SO-101 (rust/core)               │  frames: state,  │ marching, shadows, the arm   │
+ │ simulation thread, 60 Hz: the ice cream on  │ ───────────────▶ │ WebGPU renderer: SDF ray     │
+ │ the GPU (rust/gpu), spoon + SO-101 on the   │  frames: state,  │ marching, shadows, the arm   │
+ │ CPU (rust/core)                             │                  │                              │
  │   └ snapshot → per-client frame (patches)   │  poses, grid     │ meshes, particles            │
  │ WebSocket + static files (--dist)           │  patches         │ panel, keys, mouse, window.sim│
  └─────────────────────────────────────────────┘ ◀─────────────── └──────────────────────────────┘
@@ -19,8 +21,10 @@ spoon never passes through a bowl or the table**, and **Eat** empties whatever i
           └── controllers: ROS bridge, Python (tools/ws_example_client.py), `icecream serve` over stdio
 ```
 
-- Simulation: Rust (`rust/core`), deterministic, ~6 ms/frame on one core. The algorithm follows Claybook
-  (notes in `~/docs/study/claybook/`).
+- Simulation: Rust. The ice cream (SDF volumes, particles, the volume ledger) runs as WGSL compute shaders
+  through wgpu (`rust/gpu`, ~2 ms/frame while scooping on an RTX 3080 Ti); the spoon controller and the
+  SO-101 run on the CPU (`rust/core`). Without a GPU, or with `--cpu`, the same simulation runs on one CPU
+  core (~6 ms/frame). The algorithm follows Claybook (notes in `~/docs/study/claybook/`).
 - Viewer: native **WebGPU** (hand-written WGSL, no three.js). Dependencies: only `lil-gui`;
   `puppeteer-core` is used by the headless screenshot tool.
 
@@ -29,15 +33,15 @@ just install       # npm install (the viewer)
 just dev           # Rust server on :8765 + Vite on http://localhost:5173 (proxies /ws to the server)
 just chrome        # Linux: Chrome ships with WebGPU off; opens a separate profile with the flags on
 just serve         # the whole app from one binary: http://localhost:8765 (built page + simulation)
-just test          # Rust: collision, mass conservation, arm, fixture regression, WebSocket server end to end
+just test          # Rust: collision, mass, arm, fixtures, GPU vs CPU (skipped without a GPU), WebSocket server
 just screenshots   # build, run `icecream web --dist dist`, drive a scoop headless, write shots/
 just verify        # test + build + screenshots
 just               # list all recipes
 ```
 
 The page used to simulate everything itself (first in JavaScript on the CPU, then as WebGPU compute shaders,
-see git history up to `eba6656`). The Rust core was a bit-for-bit port of that JavaScript and is now the
-only implementation. Next: run the GPU version (its WGSL) inside the server through wgpu.
+see git history up to `eba6656`). The Rust core was a bit-for-bit port of that JavaScript; the server's GPU
+simulation runs the very same WGSL, moved over from the page.
 
 ### Browser support
 
@@ -68,6 +72,46 @@ Ice cream exists in two forms that convert into each other:
 - **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
   shader renders into the shadow map.
+
+### On the GPU (`rust/gpu`)
+
+The whole ice-cream state lives on the GPU: the four SDF volumes (distance + colour), the particles and the
+volume ledger sit in a few storage buffers, and each frame is **one submission** of compute passes:
+
+> carve the bowls + copy ice into the scoop (once per spoon sub-step) → carry loose ice with the spoon →
+> tip-out → PBF sub-steps (hash grid, density, collision with every SDF) → freeze resting particles
+> (smooth-min stamps) → ledger (owed ice stamped back onto the heap, extra ice shaved off) →
+> volume-preserving smoothing and settling → redistancing the scoop → statistics
+
+The CPU keeps what is small and sequential: the spoon controller (it never penetrates the analytic bowls),
+the SO-101, and deciding which passes to run. It reads back a 1.8 kB block of statistics per frame; for the
+viewer a second small submission packs the grids that changed (dirty marks set by the kernels), the
+particles and the crumbs, and reads those back too. The cutting force uses the previous frame's carving.
+
+- **Same algorithm, in f32.** Where the CPU walks voxels or particles in order and keeps a running sum,
+  the GPU runs every element at once and an exclusive **prefix scan** over the same order tells each one
+  what the sum was when it was reached. That covers displaced ice turning into one crumb per particle
+  volume, the scoop's capture budget, freezing order and compaction. Owed ice from parallel kernels goes
+  into **fixed-point bins** (3×3×3 voxels, atomic adds). Sequential decisions (paying debts, searching for
+  a free ice top) run in one workgroup that evaluates candidates and stamps together.
+- **Deterministic.** The same run twice gives bit-identical grids and particle positions on a given GPU:
+  the atomics only add integers, every list comes out of a scan, and hash cells are sorted by particle
+  index. The WGSL gives the same numbers under wgpu/naga (Vulkan) as it did in Chrome.
+- **Checked against the CPU simulation** (`rust/gpu/tests/gpu.rs`, skipped without a GPU):
+
+  | check | result |
+  |---|---|
+  | prefix scans, volume reduction | exact (u32), < 10⁻⁵ (f32) |
+  | volume-preserving smoothing + settling of 2,111 edited voxels | max difference 6·10⁻⁷ cell |
+  | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
+  | scoop, carry, eat (510 frames) | 17.8 g scooped (CPU 16.9 g), mass drift 0.009 g |
+  | tip-out | scoop gone, 1,827 particles, all frozen back 4 s later, drift 0.04 g |
+  | three plunges + eat | 52.4 g eaten, drift 0.01 g |
+  | the SO-101 carrying a GPU scoop | 17.7 g, arm within 0.32 mm of the spoon |
+  | two identical runs | bit-identical |
+
+- **Speed** (RTX 3080 Ti, Vulkan): a scoop takes ~2 ms/frame with the arm (CPU ~3–4 ms), 15,000 loose
+  particles 3.2 ms/frame. `just bench` prints both.
 
 ### Mass conservation
 
@@ -165,6 +209,7 @@ server sends `hello` (the scene: grids, bowls, spoon shape, flavours, arm links;
   `arm {enabled?, constrainTarget?, jointSpeed?}`, `set_params {params}` / `get_params` → `params`,
   `get_state` → `state`, `pause {paused}`, `step {frames}` → `state` (with `seq`). A request's `id` comes back
   in its reply.
+- `hello` and every `state` say which simulation runs (`"simulation": "gpu"` or `"cpu"`).
 - **Streams**, chosen with `config {stream, frame, rateHz}`:
   - `"state"`: `state` JSON at `rateHz` (controllers);
   - `"render"`: one binary frame per simulation frame (the page). A frame has the state, the spoon and
@@ -202,7 +247,7 @@ window.__view.capturePNG(1280, 800);               // offscreen render of one fr
 
 ```bash
 just test     # cargo test: collision, mass, arm, fixture regression, the WebSocket server end to end
-just bench    # ~6 ms/frame single-threaded, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame
+just bench    # CPU: ~6 ms/frame, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame; the same scoop on the GPU
 ```
 
 `rust/core/tests/parity.rs` replays scripted runs (a scoop, plunge-and-eat cycles, an arm-driven run) against
@@ -210,15 +255,19 @@ fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit 
 the fixtures stay as a regression net: any change to the numerics shows up there. (To match it the core
 keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
 `v8math.rs`, and the same RNG.) `rust/cli/tests/web.rs` starts a real server and checks the hello, the full
-first frame, that a scoop sends only patches of the bowl it touched, `step` / `eat` replies, and a ROS-frame
-state stream.
+first frame, that a scoop sends only patches of the bowl it touched (and the scoop's colour, even when it
+changed frames earlier), `step` / `eat` replies, and a ROS-frame state stream. `rust/gpu/tests/gpu.rs` runs
+the GPU simulation against the CPU one (table above).
 
 ## Files
 
 ```
 rust/core/             the simulation (lib icecream_core): spoon controller, SDF grids, PBF particles,
                        scooping, volume ledger, SO-101 kinematics / IK / tool modules; tests + fixtures
+rust/gpu/              the same simulation on the GPU (lib icecream_gpu, wgpu): layout.rs (buffers, the
+                       generated WGSL header), sim.rs (the frame), twin.rs (+ SO-101), src/wgsl/ (kernels)
 rust/cli/              `icecream`: web (WebSocket server + static files), serve (stdio JSON lines), bench
+  src/engine.rs          the GPU or CPU simulation behind one interface
   src/protocol.rs        the JSON commands, state, parameters, scene
   src/web.rs             simulation thread, snapshots, per-client binary frames with grid patches
 src/main.js            the viewer: builds the scene from `hello`, draws frames, panel, window.sim
@@ -232,9 +281,12 @@ tools/                 headless screenshots (shot.mjs), WebSocket example contro
 
 ## Known limitations
 
-- The simulation runs on the server's CPU (one core, ~6 ms/frame); particles are capped at 5000 by default
-  (*max particles*, up to 15,000). The GPU version written for the page (WGSL compute shaders, git history)
-  is the next step, inside the server through wgpu.
+- The GPU and CPU simulations agree closely but not bit for bit (f32, the cutting force a frame late, a few
+  voxels exactly on a test boundary), so long runs drift apart while staying physically the same. The
+  fixture regression and the CPU tests pin the CPU version; the GPU one is checked against it with
+  tolerances. Particles are capped at 5000 by default (*max particles*, up to 15,000).
+- Each GPU frame waits for its read-back (~0.3 ms on this machine); overlapping frame N's read-back with
+  frame N+1 would take that off.
 - The render stream is uncompressed: ~6 MB/s while scooping, fine on localhost, heavy over a network.
   The scoop's grid changes nearly every frame while it settles; compressing patches (or sending the colour
   only when it changes) would cut most of it.

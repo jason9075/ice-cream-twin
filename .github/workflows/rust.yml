@@ -22,6 +22,7 @@ jobs:
         with:
           workspaces: rust
 
+      # no GPU on the runners: the GPU-vs-CPU tests say so and pass, the server falls back to the CPU
       - name: Test (collision, mass conservation, arm, fixture regression, WebSocket server)
         working-directory: rust
         run: cargo test --release

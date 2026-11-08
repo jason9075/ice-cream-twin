@@ -1,4 +1,5 @@
-//! `icecream web` end to end: a real server on a free port, a WebSocket client.
+//! `icecream web` end to end: a real server on a free port, a WebSocket client. The viewer test runs
+//! the GPU simulation when there is a GPU (else the CPU one), the controller test the CPU one.
 use futures_util::{SinkExt, StreamExt};
 use icecream_cli::web::{start, Options, MAGIC};
 use serde_json::{json, Value};
@@ -65,7 +66,7 @@ fn parse(b: &[u8]) -> Frame {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn viewer_gets_the_scene_full_grids_then_patches() {
-    let (addr, server) = start(Options { port: 0, dist: None, paused: true }).await.unwrap();
+    let (addr, server) = start(Options { port: 0, dist: None, paused: true, cpu: false }).await.unwrap();
     tokio::spawn(server);
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();
 
@@ -110,6 +111,8 @@ async fn viewer_gets_the_scene_full_grids_then_patches() {
     assert!(!middle.is_empty(), "the middle bowl changed");
     assert!(middle.iter().all(|p| p[5] * p[6] * p[7] < 60 * 60 * 60), "a patch, not the whole grid");
     assert!(!f1.patches.iter().any(|p| p[0] == 0 || p[0] == 2), "the other bowls are untouched");
+    // the scoop's colour changed somewhere in those 240 frames: it must reach the viewer in this one frame
+    assert!(f1.patches.iter().any(|p| p[0] == 3 && p[1] == 1), "the scoop's colour patch");
     assert!(f1.particles > 0 || r["particles"].as_u64().unwrap() == 0);
 
     // eat replies with the grams
@@ -126,7 +129,7 @@ async fn viewer_gets_the_scene_full_grids_then_patches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn controller_gets_state_in_ros_frame() {
-    let (addr, server) = start(Options { port: 0, dist: None, paused: false }).await.unwrap();
+    let (addr, server) = start(Options { port: 0, dist: None, paused: false, cpu: true }).await.unwrap();
     tokio::spawn(server);
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();
     assert_eq!(next_text(&mut ws).await["type"], "hello");
