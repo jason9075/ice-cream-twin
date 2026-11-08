@@ -84,7 +84,9 @@ export class Remote {
       }
       const m = JSON.parse(e.data);
       if (m.type === 'hello') {
-        this.send({ type: 'config', stream: 'render' });
+        // the first frame carries every grid in full: only ask for frames once someone takes them
+        // (on a reconnect the viewer is already listening)
+        if (this.onFrame) this.startStream();
         this.onHello?.(m);
       } else if (m.id != null && this.pending.has(m.id)) {
         const p = this.pending.get(m.id);
@@ -95,6 +97,11 @@ export class Remote {
         console.warn('simulation server:', m.message);
       }
     };
+  }
+
+  /** Ask the server for render frames (set onFrame first). */
+  startStream() {
+    this.send({ type: 'config', stream: 'render' });
   }
 
   send(msg) {

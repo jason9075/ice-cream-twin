@@ -148,6 +148,7 @@ async function main() {
     sim._frame(f);
     latest = f;
   };
+  remote.startStream();
   remote.onStatus = (s) => {
     if (s === 'disconnected') fatal('Lost the simulation server', 'Reconnecting… (is <code>icecream web</code> still running?)');
     else document.getElementById('fatal').style.display = 'none';
