@@ -76,26 +76,46 @@ await page.evaluate(() => {
 await new Promise((r) => setTimeout(r, 500));
 await shot('04-gripper.png');
 
-// tip the scoop back out: loose particles pouring into the bowl
-const poured = await page.evaluate(async () => {
-  const s = window.sim;
-  await s.pause(true);
-  s.release();
-  window.__view.showParticles(true);
-  const st = await s.stepFrames(24);
-  window.__view.camera.lookFrom({ x: 0.16, y: 0.24, z: 0.2 }, { x: 0, y: 0.1, z: -0.02 });
-  return { particles: st.particles, simulation: st.simulation };
+// roll the spoon over the bowl (quickly): past the slide-off tilt the scoop drops off in one piece
+await page.evaluate(async () => {
+  await window.sim.pause(true);
+  await window.sim.setParams({ spoon: { maxAngSpeed: 360 } });
 });
-await new Promise((r) => setTimeout(r, 300));
-await shot('05-pour.png');
-console.log(`pour: ${poured.particles} loose particles (${poured.simulation} simulation)`);
+const rollAbout = (deg) => {
+  const h = (deg * Math.PI) / 360; // about world Z (the handle points toward -Z)
+  return [0, 0, Math.sin(h), Math.cos(h)];
+};
+const rolled = await page.evaluate(async (q) => {
+  const s = window.sim;
+  const [ax, ay, az, aw] = q;
+  const b = [0, Math.SQRT1_2, 0, Math.SQRT1_2]; // q(0): 90° about Y
+  const m = [aw * b[0] + ax * b[3] + ay * b[2] - az * b[1], aw * b[1] - ax * b[2] + ay * b[3] + az * b[0], aw * b[2] + ax * b[1] - ay * b[0] + az * b[3], aw * b[3] - ax * b[0] - ay * b[1] - az * b[2]];
+  s.setTarget({ position: [0, 0.15, -0.03], quaternion: m });
+  // the arm turns at its joint speed: step until the scoop slides off
+  let st;
+  let frames = 0;
+  do {
+    st = await s.stepFrames(5);
+    frames += 5;
+  } while (st.scoopedGrams > 0.5 && frames < 300);
+  return frames;
+}, rollAbout(150));
+console.log(`the scoop slid off after ${rolled} frames of rolling`);
+await page.evaluate(() => window.__view.camera.lookFrom({ x: 0.05, y: 0.27, z: 0.17 }, { x: 0, y: 0.1, z: -0.03 }));
+for (const [name, frames] of [['05-drop.png', 4], ['06-falling.png', 4], ['07-landed.png', 60]]) {
+  const st = await page.evaluate((n) => window.sim.stepFrames(n), frames);
+  await new Promise((r) => setTimeout(r, 300));
+  await shot(name);
+  console.log(`${name}: ${st.particles} loose particles, ${st.scoopedGrams.toFixed(1)} g on the spoon, tilt ${(st.spoon?.tiltDeg ?? st.tiltDeg)?.toFixed(0)}°`);
+}
+
 
 // the same frame through the View panel's debug options
 const views = [
-  ['06-pour-balls.png', { particles: 'balls' }],
-  ['07-debug-tint.png', { particles: 'surface', tintFluid: true, gridBoxes: true }],
-  ['08-debug-normals.png', { tintFluid: false, gridBoxes: false, shading: 'normals' }],
-  ['09-debug-steps.png', { shading: 'march steps' }],
+  ['08-balls.png', { particles: 'balls' }],
+  ['09-debug-tint.png', { particles: 'surface', tintFluid: true, gridBoxes: true }],
+  ['10-debug-normals.png', { tintFluid: false, gridBoxes: false, shading: 'normals' }],
+  ['11-debug-steps.png', { shading: 'march steps' }],
 ];
 for (const [name, patch] of views) {
   await page.evaluate((p) => window.__view.setView(p), patch);
