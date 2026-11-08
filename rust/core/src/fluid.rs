@@ -58,9 +58,10 @@ pub struct Fluid {
     /// spacing (diameter)
     pub d: f64,
     pub h: f64,
-    h2: f64,
-    rho0: f64,
-    eps: f64,
+    pub h2: f64,
+    /// rest density (kernel sum over a cubic lattice at spacing d)
+    pub rho0: f64,
+    pub eps: f64,
 }
 
 #[inline]

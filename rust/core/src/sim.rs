@@ -787,6 +787,12 @@ impl Sim {
         self.debts.push(Debt { g, x, y, z, vol, rgba, tries: 0 });
     }
 
+    /// The per-voxel floor of the content grid (built on first use; also clamps the content to it).
+    pub fn content_floor(&mut self) -> Vec<f32> {
+        self.clamp_content();
+        self.content_floor.clone().unwrap()
+    }
+
     /// Where the scoop may never be (spoon coordinates): under the outside of the cup, and
     /// within two cells of its grid's walls. Content values are clamped to this floor.
     fn clamp_content(&mut self) {
@@ -1265,6 +1271,12 @@ impl Sim {
     pub fn particle_volume(&self) -> f64 {
         let r = if self.fluid.r > 0.0 { self.fluid.r } else { self.params.fluid.particle_radius };
         8.0 * r * r * r
+    }
+
+    /// Carve and copy at one spoon pose, as a frame does along the spoon's path (for comparisons:
+    /// the GPU simulation's checks run the same sequence of poses through both).
+    pub fn interact_at(&mut self, pos: Vec3, quat: Quat) {
+        self.interact(pos, quat, 1.0 / 60.0, true);
     }
 
     /// Take the spoon's current pose as the one eat / release work at (between frames).

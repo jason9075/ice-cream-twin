@@ -271,6 +271,11 @@ impl SdfGrid {
     }
 
     #[inline]
+    /// Which voxels were edited since the last smoothing pass (1 = edited).
+    pub fn touched_flags(&self) -> &[u8] {
+        &self.touched
+    }
+
     pub fn touch(&mut self, idx: usize) {
         if self.touched[idx] == 0 {
             self.touched[idx] = 1;
