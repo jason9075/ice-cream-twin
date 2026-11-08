@@ -90,6 +90,21 @@ await new Promise((r) => setTimeout(r, 300));
 await shot('05-pour.png');
 console.log(`pour: ${poured.particles} loose particles (${poured.simulation} simulation)`);
 
+// the same frame through the View panel's debug options
+const views = [
+  ['06-pour-balls.png', { particles: 'balls' }],
+  ['07-debug-tint.png', { particles: 'surface', tintFluid: true, gridBoxes: true }],
+  ['08-debug-normals.png', { tintFluid: false, gridBoxes: false, shading: 'normals' }],
+  ['09-debug-steps.png', { shading: 'march steps' }],
+];
+for (const [name, patch] of views) {
+  await page.evaluate((p) => window.__view.setView(p), patch);
+  await new Promise((r) => setTimeout(r, 300));
+  await shot(name);
+}
+await page.evaluate(() => window.__view.setView({ shading: 'shaded' }));
+console.log(`fluid grid: ${await page.evaluate(() => JSON.stringify(window.__view.fluid.info))}`);
+
 console.log(JSON.stringify({ arm: { joints: state.arm?.jointsDeg?.map((v) => +v.toFixed(1)), errMm: state.arm?.trackingErrorMm }, scoopedGrams: state.scoopedGrams, particles: state.particles, bowls: state.bowlGrams, blocked: state.blocked }, null, 1));
 console.log(errors.length ? errors.join('\n') : 'no console errors');
 await browser.close();

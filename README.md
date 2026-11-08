@@ -190,8 +190,17 @@ chain (`rust/core/src/robot/urdf.rs`).
 The side panel adjusts everything live: fluid (particle radius, viscosity, cohesion, friction, damping,
 gravity, iterations…), freezing, ice cream (hardness in kPa, accretion, capacity, slide-off angle, surface
 smoothing, density, refill shape) and the spoon controller (max speeds, max cutting force); every change
-goes to the server (`set_params`). Under **View** you can show the target ghost and the loose particles
-(hidden by default).
+goes to the server (`set_params`). **View** is drawing only, nothing goes to the server:
+- **loose particles**: `surface` (default) melts them into one smooth surface: each frame a compute pass
+  splats them into a grid around them and builds the smoothed-particle distance of Zhu & Bridson, which the
+  ice cream's sphere tracer then draws (`src/gpu/fluid.js`). `balls`, `both` or `hidden` instead. The
+  surface's radius, blend kernel and voxel size are sliders (× particle radius), with the grid it used.
+- **Show**: crumbs, ice cream in the bowls and on the spoon, bowls, spoon, SO-101, table, target ghost,
+  shadows.
+- **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map), a blue tint on the particle
+  surface, and translucent boxes for each SDF grid (orange: bowls, green: spoon, blue: particle surface).
+
+From the console, `__view.setView({shading: 'normals', gridBoxes: true})` sets the same options.
 
 ## Digital-twin interface
 
@@ -272,7 +281,7 @@ rust/cli/              `icecream`: web (WebSocket server + static files), serve 
   src/web.rs             simulation thread, snapshots, per-client binary frames with grid patches
 src/main.js            the viewer: builds the scene from `hello`, draws frames, panel, window.sim
 src/net/remote.js      WebSocket client, frame decoding, the spoon / params the panel uses
-src/gpu/               WebGPU renderer, WGSL, geometry, orbit camera
+src/gpu/               WebGPU renderer, WGSL, particle surface (fluid.js), geometry, orbit camera
 src/robot/render.js    loads public/so101/ and poses the link meshes from the streamed matrices
 src/ui/panel.js        control panel (jog, go to pose, readouts)
 public/so101/          decimated SO-101 meshes + licence (tools/so101_assets.py)
