@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>GPU sim tests</title>
+<!-- Blank page with a WebGPU device for tools/gpu-sim-check.mjs (served by the Vite dev server). -->
+<script type="module">
+  const adapter = (await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })) ?? (await navigator.gpu.requestAdapter());
+  const device = await adapter.requestDevice({ requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : [] });
+  window.gpuErrors = [];
+  device.addEventListener('uncapturederror', (e) => window.gpuErrors.push(e.error.message));
+  window.device = device;
+  window.adapterInfo = adapter.info ? `${adapter.info.vendor} ${adapter.info.architecture} ${adapter.info.description}` : '';
+  // a running rAF loop, like the app: Chrome then processes GPU callbacks (mapAsync) promptly
+  const spin = () => requestAnimationFrame(spin);
+  spin();
+  window.ready = true;
+</script>

@@ -236,8 +236,11 @@ export class Renderer {
     };
   }
 
-  /** GPU side of an SdfGrid: r8unorm distance texture + rgba8unorm colour texture. */
-  createVolume(grid, boxMesh) {
+  /**
+   * GPU side of an SdfGrid: r8unorm distance texture + rgba8unorm colour texture. With
+   * `external`, the textures are written by the GPU simulation (src/gpu/sim) and sync() does nothing.
+   */
+  createVolume(grid, boxMesh, { external = false } = {}) {
     const d = this.device;
     const size = [grid.nx, grid.ny, grid.nz];
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
@@ -248,6 +251,8 @@ export class Renderer {
     data.set([grid.sx, grid.sy, grid.sz, grid.band, grid.cell, 0, 0, 0], 32);
     const vol = {
       grid,
+      sdfTex: sdf,
+      colTex: col,
       mesh: boxMesh,
       buf,
       data,
@@ -268,6 +273,7 @@ export class Renderer {
         d.queue.writeBuffer(buf, 0, data);
       },
       sync: () => {
+        if (external) return;
         if (grid.dirty) {
           grid.pack();
           d.queue.writeTexture({ texture: sdf }, grid.bytes, { bytesPerRow: grid.nx, rowsPerImage: grid.ny }, size);
@@ -279,9 +285,11 @@ export class Renderer {
         }
       },
     };
-    grid.dirty = true;
-    grid.colorDirty = true;
-    vol.sync();
+    if (!external) {
+      grid.dirty = true;
+      grid.colorDirty = true;
+      vol.sync();
+    }
     vol.setModel(mat4.translation(grid.ox, grid.oy, grid.oz));
     return vol;
   }
@@ -427,11 +435,13 @@ export class Renderer {
   _drawInstances(pass, pipe, list) {
     pass.setPipeline(pipe);
     for (const o of list) {
-      if (!o.visible || !o.count) continue;
+      if (!o.visible || (!o.count && !o.indirect)) continue;
       pass.setBindGroup(1, o.bg);
       pass.setVertexBuffer(0, o.mesh.vb);
       pass.setIndexBuffer(o.mesh.ib, 'uint32');
-      pass.drawIndexed(o.mesh.count, o.count);
+      // GPU-written instances (src/gpu/sim) draw as many as the simulation says
+      if (o.indirect) pass.drawIndexedIndirect(o.indirect.buffer, o.indirect.offset);
+      else pass.drawIndexed(o.mesh.count, o.count);
     }
   }
 
