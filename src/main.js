@@ -328,6 +328,7 @@ async function main() {
     surfaceRadius: 1.3, // × particle radius
     surfaceKernel: 3.0, // × particle radius
     surfaceVoxel: 0.8, // × particle radius
+    surfaceSmooth: 1.6, // × particle radius (Gaussian blur of the distance; 0 = off)
     tintFluid: false,
     crumbs: true,
     bowlIce: true,
@@ -346,9 +347,9 @@ async function main() {
 
   function updateFluid(n, lo, hi) {
     const pr = sim.params.fluid.particleRadius;
-    fluid.update(n, lo, hi, { r: view.surfaceRadius * pr, R: view.surfaceKernel * pr, voxel: view.surfaceVoxel * pr, tint: view.tintFluid });
+    fluid.update(n, lo, hi, { r: view.surfaceRadius * pr, R: view.surfaceKernel * pr, voxel: view.surfaceVoxel * pr, smooth: view.surfaceSmooth * pr, tint: view.tintFluid });
     const i = fluid.info;
-    fluidInfo.status = n ? `${n} particles, ${i.dims.join('×')} @ ${(i.cell * 1000).toFixed(2)} mm` : 'no loose particles';
+    fluidInfo.status = n ? `${n} particles, ${i.dims.join('×')} @ ${(i.cell * 1000).toFixed(2)} mm, blur ${fluid.blur}` : 'no loose particles';
   }
   function applyView() {
     const m = view.particles;
@@ -407,6 +408,7 @@ async function main() {
     sf.add(view, 'surfaceRadius', 0.5, 3, 0.05).name('radius × r').onChange(on);
     sf.add(view, 'surfaceKernel', 1.5, 6, 0.1).name('blend kernel × r').onChange(on);
     sf.add(view, 'surfaceVoxel', 0.3, 2, 0.05).name('voxel × r').onChange(on);
+    sf.add(view, 'surfaceSmooth', 0, 4, 0.1).name('smoothing × r').onChange(on);
     sf.add(fluidInfo, 'status').name('grid').disable().listen();
     const show = v.addFolder('Show');
     show.add(view, 'crumbs').name('crumbs (spilled)').onChange(on);

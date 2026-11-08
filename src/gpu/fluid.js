@@ -15,7 +15,7 @@ const splatWGSL = /* wgsl */ `
 struct U {
   origin : vec3f, cell : f32,
   dims : vec3u, n : u32,
-  R : f32, r : f32, _a : f32, _b : f32,
+  R : f32, r : f32, blur : f32, _b : f32,   // blur: Gaussian radius in voxels (0 = none)
 };
 struct Inst { p : vec4f, c : vec4f };   // same layout as the sphere instances: xyz + radius, rgba
 @group(0) @binding(0) var<uniform> P : U;
@@ -23,6 +23,8 @@ struct Inst { p : vec4f, c : vec4f };   // same layout as the sphere instances: 
 @group(0) @binding(2) var<storage, read_write> acc : array<atomic<u32>>;
 @group(0) @binding(3) var phiTex : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(4) var colTex : texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(5) var<storage, read_write> phiA : array<f32>;
+@group(0) @binding(6) var<storage, read_write> phiB : array<f32>;
 
 const S = ${S}.0;
 
@@ -75,9 +77,32 @@ fn take(i : u32) -> f32 { return f32(atomicExchange(&acc[i], 0u)) / S; }
     phi = clamp(length(xbar) - P.r, -P.R, P.R);
     col = c / w;
   }
-  textureStore(phiTex, id, vec4f(phi, 0.0, 0.0, 0.0));
   textureStore(colTex, id, col);
+  if (P.blur < 0.5) { textureStore(phiTex, id, vec4f(phi, 0.0, 0.0, 0.0)); }
+  else { phiA[idx(id)] = phi; }
 }
+
+fn idx(c : vec3u) -> u32 { return c.x + P.dims.x * (c.y + P.dims.y * c.z); }
+
+// Separable Gaussian on the distance (smooths the particle-sized bumps): x A->B, y B->A, z A->texture.
+${['x', 'y', 'z'].map((ax, k) => `
+@compute @workgroup_size(4, 4, 4) fn blur${ax.toUpperCase()}(@builtin(global_invocation_id) id : vec3u) {
+  if (any(id >= P.dims)) { return; }
+  let rad = i32(P.blur + 0.5);
+  let s2 = 2.0 * (P.blur * 0.5) * (P.blur * 0.5);
+  var sum = 0.0;
+  var wsum = 0.0;
+  for (var k = -rad; k <= rad; k++) {
+    let j = i32(id.${ax}) + k;
+    if (j < 0 || j >= i32(P.dims.${ax})) { continue; }
+    var c = id;
+    c.${ax} = u32(j);
+    let w = exp(-f32(k * k) / s2);
+    sum += w * ${k === 1 ? 'phiB' : 'phiA'}[idx(c)];
+    wsum += w;
+  }
+  ${k === 0 ? 'phiB[idx(id)] = sum / wsum;' : k === 1 ? 'phiA[idx(id)] = sum / wsum;' : 'textureStore(phiTex, id, vec4f(sum / wsum, 0.0, 0.0, 0.0));'}
+}`).join('\n')}
 `;
 
 /**
@@ -99,17 +124,22 @@ export function createFluidSurface(r, instances, { maxDim = 128, maxVoxels = 1_5
       { binding: 2, visibility: C, buffer: { type: 'storage' } },
       { binding: 3, visibility: C, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
       { binding: 4, visibility: C, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '3d' } },
+      { binding: 5, visibility: C, buffer: { type: 'storage' } },
+      { binding: 6, visibility: C, buffer: { type: 'storage' } },
     ],
   });
   const layout = d.createPipelineLayout({ bindGroupLayouts: [bgl] });
   const splat = d.createComputePipeline({ layout, compute: { module: mod, entryPoint: 'splat' } });
   const resolve = d.createComputePipeline({ layout, compute: { module: mod, entryPoint: 'resolve' } });
+  const blurs = ['blurX', 'blurY', 'blurZ'].map((e) => d.createComputePipeline({ layout, compute: { module: mod, entryPoint: e } }));
 
   const size = [maxDim, maxDim, maxDim];
   const usage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING;
   const phiTex = d.createTexture({ size, dimension: '3d', format: 'rgba16float', usage });
   const colTex = d.createTexture({ size, dimension: '3d', format: 'rgba8unorm', usage });
   const acc = d.createBuffer({ size: maxVoxels * CHANNELS * 4, usage: GPUBufferUsage.STORAGE });
+  const phiA = d.createBuffer({ size: maxVoxels * 4, usage: GPUBufferUsage.STORAGE });
+  const phiB = d.createBuffer({ size: maxVoxels * 4, usage: GPUBufferUsage.STORAGE });
   const ubuf = d.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const bg = d.createBindGroup({
     layout: bgl,
@@ -119,6 +149,8 @@ export function createFluidSurface(r, instances, { maxDim = 128, maxVoxels = 1_5
       { binding: 2, resource: { buffer: acc } },
       { binding: 3, resource: phiTex.createView({ dimension: '3d' }) },
       { binding: 4, resource: colTex.createView({ dimension: '3d' }) },
+      { binding: 5, resource: { buffer: phiA } },
+      { binding: 6, resource: { buffer: phiB } },
     ],
   });
   const u = new ArrayBuffer(48);
@@ -138,13 +170,15 @@ export function createFluidSurface(r, instances, { maxDim = 128, maxVoxels = 1_5
     maxDim,
     /** Particles, grid dims and cell size of the last update (for the debug readout). */
     info: { n: 0, dims: [0, 0, 0], cell: 0 },
+    blur: 0,
     /** Box (world) the surface covers this frame, or null when there is nothing to draw. */
     box: null,
     /**
      * Fit the grid around the n particles of `instances` (bounds lo/hi, world metres).
-     * r: surface radius, R: kernel radius, voxel: preferred cell size, tint: debug colour.
+     * r: surface radius, R: kernel radius, voxel: preferred cell size, smooth: blur radius (m),
+     * tint: debug colour.
      */
-    update(n, lo, hi, { r: rad, R, voxel, tint = false }) {
+    update(n, lo, hi, { r: rad, R, voxel, smooth = 0, tint = false }) {
       surf.info.n = n;
       if (!n) {
         surf.box = null;
@@ -159,7 +193,8 @@ export function createFluidSurface(r, instances, { maxDim = 128, maxVoxels = 1_5
       const dims = ext.map((e) => Math.min(maxDim, Math.ceil(e / cell)));
       uf.set([o[0], o[1], o[2], cell], 0);
       uu.set([dims[0], dims[1], dims[2], n], 4);
-      uf.set([R, rad, 0, 0], 8);
+      surf.blur = smooth > 0 ? Math.min(4, Math.max(1, Math.round(smooth / cell))) : 0;
+      uf.set([R, rad, surf.blur, 0], 8);
       d.queue.writeBuffer(ubuf, 0, u);
       surf.info.dims = dims;
       surf.info.cell = cell;
@@ -177,7 +212,13 @@ export function createFluidSurface(r, instances, { maxDim = 128, maxVoxels = 1_5
       pass.dispatchWorkgroups(Math.ceil(surf.info.n / WG));
       pass.setPipeline(resolve);
       const [x, y, z] = surf.info.dims;
-      pass.dispatchWorkgroups(Math.ceil(x / 4), Math.ceil(y / 4), Math.ceil(z / 4));
+      const grid = [Math.ceil(x / 4), Math.ceil(y / 4), Math.ceil(z / 4)];
+      pass.dispatchWorkgroups(...grid);
+      if (surf.blur)
+        for (const b of blurs) {
+          pass.setPipeline(b);
+          pass.dispatchWorkgroups(...grid);
+        }
       pass.end();
     },
   };
