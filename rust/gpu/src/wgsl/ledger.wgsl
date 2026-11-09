@@ -353,7 +353,7 @@ fn ledgerPay(@builtin(local_invocation_id) lid: vec3u) {
 // ---------------------------------------------------------------- smoothing residuals (Sim._settleResidual)
 @compute @workgroup_size(1)
 fn ledgerResiduals() {
-  for (var g = 0u; g < 4u; g++) {
+  for (var g = 0u; g < NG; g++) {
     let r = W[W_ST + S_residual + g];
     W[W_ST + S_residual + g] = 0.0;
     if (abs(r) < 1e-12) { continue; }

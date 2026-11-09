@@ -7,5 +7,6 @@ pub mod layout;
 pub mod sim;
 pub mod twin;
 
-pub use sim::{open_gpu, GpuSim, Stats};
+pub use sim::{open_gpu, GpuSim, RenderPack, Stats};
+pub use wgpu;
 pub use twin::GpuTwin;

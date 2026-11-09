@@ -131,7 +131,7 @@ fn touch(g: u32, idx: u32) {
   X[X_FLAG + GN[g].w + idx] = 1u;
   X[X_STU + SU_dirty + g] = 1u;
 }
-fn colorChanged(g: u32) { X[X_STU + SU_dirty + 4u + g] = 1u; }
+fn colorChanged(g: u32) { X[X_STU + SU_dirty + NG + g] = 1u; }
 fn distChanged(g: u32) { X[X_STU + SU_dirty + g] = 1u; }
 
 // ---------------------------------------------------------------- SDFs (src/sim/sdf.js)

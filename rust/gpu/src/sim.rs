@@ -8,7 +8,7 @@
 //! With `stream` on, a second small submission packs what changed for the viewer (grids that were
 //! edited, particles, crumbs) and reads it back.
 
-use crate::layout::{cnt, shader, entry_points, st, stu, Layout, CAP, MAX_SPILLED, PASS_BYTES};
+use crate::layout::{cnt, entry_points, pack_row_words, shader, st, stu, Layout, CAP, MAX_SPILLED, NG, PASS_BYTES};
 use icecream_core::fluid::MAX_LUMPS;
 use icecream_core::math::{Quat, Vec3};
 use icecream_core::params::Params;
@@ -16,6 +16,7 @@ use icecream_core::sdf::SPOON;
 use icecream_core::spoon::Substep;
 use icecream_core::Sim;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::f64::consts::PI;
 use std::time::Instant;
 
@@ -41,6 +42,14 @@ pub fn open_gpu() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
             .map_err(|e| format!("request_device: {e}"))?;
         Ok((device, queue, name))
     })
+}
+
+/// What `pack_for_render` packed: which grids, how many particles and crumbs.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderPack {
+    pub grids: [bool; NG],
+    pub n: u32,
+    pub crumbs: u32,
 }
 
 /// Per-dispatch parameters (the WGSL `Pass` struct, 256 bytes).
@@ -155,7 +164,8 @@ impl Frame {
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub content_vol: f64,
-    pub volume: [f64; 4],
+    /// per GPU grid: the bowls, the scoop, the table
+    pub volume: [f64; NG],
     pub removed: f64,
     pub spilled_vol: f64,
     pub eaten_vol: f64,
@@ -164,14 +174,15 @@ pub struct Stats {
     pub n: u32,
     pub spilled: u32,
     pub n_debts: u32,
-    pub settle_frames: [u32; 4],
-    pub dirty: [bool; 8],
+    pub settle_frames: [u32; NG],
+    /// NG distance, then NG colour marks
+    pub dirty: [bool; 2 * NG],
     pub gpu_ms: f64,
 }
 
 pub struct GpuSim {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     pub adapter: String,
     pub l: Layout,
     names: HashMap<String, usize>,
@@ -204,12 +215,14 @@ pub struct GpuSim {
     /// stream the viewer's data each frame (grids that changed, particles, crumbs)
     pub stream: bool,
     force_pack: bool,
+    /// pack every grid for the renderer next time (`pack_for_render`)
+    render_force: bool,
     /// per grid: r8 distances and rgba8 colours as the viewer's textures hold them, and whether they
     /// changed since the viewer last cleared the marks
     pub dist: Vec<Vec<u8>>,
     pub color: Vec<Vec<u8>>,
-    pub dist_dirty: [bool; 4],
-    pub color_dirty: [bool; 4],
+    pub dist_dirty: [bool; NG],
+    pub color_dirty: [bool; NG],
     /// n x (f32 x, y, z, u32 rgba)
     pub particles: Vec<u8>,
     pub spilled: Vec<u8>,
@@ -219,10 +232,11 @@ pub struct GpuSim {
 impl GpuSim {
     pub fn new(params: Params) -> Result<Self, String> {
         let (device, queue, adapter) = open_gpu()?;
-        Ok(Self::with_device(device, queue, adapter, params))
+        Ok(Self::with_device(Arc::new(device), Arc::new(queue), adapter, params))
     }
 
-    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue, adapter: String, params: Params) -> Self {
+    /// On a device someone else made (the app shares it with the renderer).
+    pub fn with_device(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, adapter: String, params: Params) -> Self {
         let cpu = Sim::new(params);
         let l = Layout::new(&cpu);
         let code = shader(&l);
@@ -326,10 +340,11 @@ impl GpuSim {
             frame: 0,
             stream: false,
             force_pack: true,
+            render_force: true,
             dist: l.grids.iter().map(|g| vec![0; g.count as usize]).collect(),
             color: l.grids.iter().map(|g| vec![0; g.count as usize * 4]).collect(),
-            dist_dirty: [true; 4],
-            color_dirty: [true; 4],
+            dist_dirty: [true; NG],
+            color_dirty: [true; NG],
             particles: Vec::new(),
             spilled: Vec::new(),
             spilled_version: 0,
@@ -343,17 +358,22 @@ impl GpuSim {
     // ------------------------------------------------------------------ state
     fn upload_grid(&mut self, k: usize) {
         let off = self.l.grids[k].off as u64;
-        let g = if k < 3 { &self.cpu.grids[k] } else { &self.cpu.content };
+        let g = self.cpu_grid(k);
         self.queue.write_buffer(&self.w, (self.l.w.get("D") as u64 + off) * 4, bytemuck::cast_slice(&g.data));
         self.queue.write_buffer(&self.x, (self.l.x.get("COL") as u64 + off) * 4, &g.color);
         self.queue.write_buffer(&self.x, (self.l.x.get("FLAG") as u64 + off) * 4, &vec![0u8; g.n * 4]);
+    }
+
+    /// The CPU simulation's grid behind GPU grid `k` (the bowls, the scoop).
+    fn cpu_grid(&self, k: usize) -> &icecream_core::grid::SdfGrid {
+        if k < 3 { &self.cpu.grids[k] } else { &self.cpu.content }
     }
 
     /// Back to the start: the CPU simulation's initial ice, an empty spoon, no particles.
     pub fn reset(&mut self) {
         self.cpu.reset();
         let floor = self.cpu.content_floor();
-        for k in 0..4 {
+        for k in 0..NG {
             self.upload_grid(k);
         }
         self.queue.write_buffer(&self.w, self.l.w.get("FLOOR") as u64 * 4, bytemuck::cast_slice(&floor));
@@ -382,6 +402,7 @@ impl GpuSim {
         self.spilled.clear();
         self.spilled_version += 1;
         self.force_pack = true;
+        self.render_force = true;
     }
 
     /// Refill the bowls (the CPU simulation's fill shape).
@@ -391,6 +412,7 @@ impl GpuSim {
             self.upload_grid(k);
         }
         self.force_pack = true;
+        self.render_force = true;
     }
 
     /// Tip everything on the spoon off as particles (next frame).
@@ -647,7 +669,7 @@ impl GpuSim {
             let c = |k: u32| u32::from_le_bytes(b[1536 + k as usize * 4..1540 + k as usize * 4].try_into().unwrap());
             Stats {
                 content_vol: f(st::CONTENT_VOL),
-                volume: [0, 1, 2, 3].map(|k| f(st::VOLUME + k)),
+                volume: std::array::from_fn(|k| f(st::VOLUME + k as u32)),
                 removed: f(st::REMOVED),
                 spilled_vol: f(st::SPILLED_VOL),
                 eaten_vol: f(st::EATEN_VOL),
@@ -656,7 +678,7 @@ impl GpuSim {
                 n: c(cnt::N),
                 spilled: c(cnt::SPILLED),
                 n_debts: u(stu::N_DEBTS),
-                settle_frames: [0, 1, 2, 3].map(|k| u(stu::SETTLE_FRAMES + k)),
+                settle_frames: std::array::from_fn(|k| u(stu::SETTLE_FRAMES + k as u32)),
                 dirty: std::array::from_fn(|k| u(stu::DIRTY + k as u32) != 0),
                 gpu_ms: 0.0,
             }
@@ -804,7 +826,7 @@ impl GpuSim {
         self.run(&mut fr, "finishSum", 1, Pass { i0: [0, cw as i32, (st::RESIDUAL + 3) as i32, 1], f0: [c3, 0.0, 0.0, 0.0], ..Default::default() });
         self.run(&mut fr, "ledgerResiduals", 1, Pass::default());
         // 8. statistics
-        for k in 0..4 {
+        for k in 0..NG {
             self.grid_occ(&mut fr, k, st::VOLUME + k as u32, 0);
         }
         self.grid_occ(&mut fr, 3, st::CONTENT_VOL, 0);
@@ -828,12 +850,48 @@ impl GpuSim {
     }
 
     /// Pack and read back what the viewer needs: grids that changed, particles, crumbs.
+    /// For a renderer on the same device: pack the grids that changed since the last call (r8 distance and
+    /// rgba8 colour rows of 256 bytes, ready for copy_buffer_to_texture) and the particles + crumbs, all on
+    /// the GPU; nothing is read back. Then copy from `render_buffers`.
+    pub fn pack_for_render(&mut self) -> RenderPack {
+        let mut fr = Frame::new();
+        let force = std::mem::take(&mut self.render_force);
+        let mut grids = [false; NG];
+        for (k, packed) in grids.iter_mut().enumerate() {
+            if !(self.stats.dirty[k] || self.stats.dirty[NG + k] || force) {
+                continue;
+            }
+            let g = &self.l.grids[k];
+            let (dw, cw) = pack_row_words(g.n[0]);
+            self.run(&mut fr, "packGrid", g.n[1] * g.n[2], Pass::i([k as i32, self.pack_off[k] as i32, dw as i32, cw as i32]));
+            *packed = true;
+        }
+        self.particles(&mut fr, "packParticles", Pass::i([(CAP * 4) as i32, 0, 0, 0]));
+        self.submit(fr);
+        if !self.stream {
+            // nobody else consumes the dirty marks
+            self.queue.write_buffer(&self.x, (self.l.x.get("STU") + stu::DIRTY) as u64 * 4, &[0u8; 8 * NG]);
+            self.stats.dirty = [false; 2 * NG];
+        }
+        RenderPack { grids, n: self.stats.n.min(CAP), crumbs: self.stats.spilled.min(MAX_SPILLED) }
+    }
+
+    /// Packed grids, per grid (byte offset in it, distance row bytes, colour row bytes), particles +
+    /// crumbs, byte offset of the crumbs.
+    pub fn render_buffers(&self) -> (&wgpu::Buffer, Vec<[u64; 3]>, &wgpu::Buffer, u64) {
+        let rows = self.l.grids.iter().zip(&self.pack_off).map(|(g, &o)| {
+            let (dw, cw) = pack_row_words(g.n[0]);
+            [o as u64 * 4, dw as u64 * 4, cw as u64 * 4]
+        });
+        (&self.pk, rows.collect(), &self.pp, CAP as u64 * 16)
+    }
+
     fn stream_out(&mut self) {
         let mut fr = Frame::new();
         let force = std::mem::take(&mut self.force_pack);
         let mut packed = Vec::new();
         for k in 0..4 {
-            let (d, c) = (self.stats.dirty[k] || force, self.stats.dirty[4 + k] || force);
+            let (d, c) = (self.stats.dirty[k] || force, self.stats.dirty[NG + k] || force);
             // accumulate until the viewer takes them (several frames may pass between two views)
             self.dist_dirty[k] |= d;
             self.color_dirty[k] |= c;
@@ -842,9 +900,10 @@ impl GpuSim {
             }
             let g = &self.l.grids[k];
             let rows = g.n[1] * g.n[2];
-            self.run(&mut fr, "packGrid", rows, Pass::i([k as i32, self.pack_off[k] as i32, 0, 0]));
+            let (dw, cw) = pack_row_words(g.n[0]);
+            self.run(&mut fr, "packGrid", rows, Pass::i([k as i32, self.pack_off[k] as i32, dw as i32, cw as i32]));
             let off = self.pack_off[k] as u64 * 4;
-            self.copy(&mut fr, Buf::Pk, off, 1, off, rows as u64 * 2 * 256);
+            self.copy(&mut fr, Buf::Pk, off, 1, off, rows as u64 * (dw + cw) as u64 * 4);
             packed.push(k);
         }
         let n = self.stats.n.min(CAP) as u64;
@@ -859,7 +918,7 @@ impl GpuSim {
         }
         self.submit(fr);
         // the dirty marks are consumed: clear them before the next frame
-        self.queue.write_buffer(&self.x, (self.l.x.get("STU") + stu::DIRTY) as u64 * 4, &[0u8; 32]);
+        self.queue.write_buffer(&self.x, (self.l.x.get("STU") + stu::DIRTY) as u64 * 4, &[0u8; 8 * NG]);
         if !packed.is_empty() {
             let grids = self.l.grids.clone();
             let offs = self.pack_off.clone();
@@ -870,9 +929,11 @@ impl GpuSim {
                     let g = &grids[k];
                     let (nx, rows) = (g.n[0] as usize, (g.n[1] * g.n[2]) as usize);
                     let o = offs[k] as usize * 4;
+                    let (dw, cw) = pack_row_words(g.n[0]);
+                    let (db, cb) = (dw as usize * 4, cw as usize * 4);
                     for r in 0..rows {
-                        dist[k][r * nx..r * nx + nx].copy_from_slice(&b[o + r * 256..o + r * 256 + nx]);
-                        let oc = o + rows * 256 + r * 256;
+                        dist[k][r * nx..r * nx + nx].copy_from_slice(&b[o + r * db..o + r * db + nx]);
+                        let oc = o + rows * db + r * cb;
                         color[k][r * nx * 4..(r + 1) * nx * 4].copy_from_slice(&b[oc..oc + nx * 4]);
                     }
                 }

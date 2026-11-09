@@ -15,6 +15,11 @@ impl GpuTwin {
         Ok(Self::from_sim(sim))
     }
 
+    /// On a device the caller made (shared with a renderer).
+    pub fn with_device(params: Params, device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>, adapter: String) -> Self {
+        Self::from_sim(GpuSim::with_device(device, queue, adapter, params))
+    }
+
     pub fn from_sim(mut sim: GpuSim) -> Self {
         let mut arm = Arm::default();
         arm.reset(Some(&mut sim.cpu.spoon));

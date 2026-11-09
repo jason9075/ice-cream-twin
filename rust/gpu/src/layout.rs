@@ -76,9 +76,11 @@ pub mod st {
     pub const CONTENT_VOL: u32 = 6;
     pub const DEBT_VOL: u32 = 7;
     pub const CREDIT: u32 = 8;
-    pub const RESIDUAL: u32 = 12;
-    pub const NEG_SETTLE: u32 = 16;
-    pub const VOLUME: u32 = 20;
+    /// per grid (NG): 40.., 48.., 56..
+    pub const RESIDUAL: u32 = 40;
+    pub const NEG_SETTLE: u32 = 48;
+    pub const VOLUME: u32 = 56;
+
     pub const GAINED: u32 = 24;
     pub const CONTENT_VOL_START: u32 = 25;
     pub const DISPLACED_FRAME: u32 = 26;
@@ -95,8 +97,9 @@ pub mod st {
 }
 pub mod stu {
     pub const N_DEBTS: u32 = 0;
-    pub const SETTLE_FRAMES: u32 = 4;
-    pub const RESIDUAL_IDX: u32 = 8;
+    /// per grid (NG)
+    pub const SETTLE_FRAMES: u32 = 40;
+    pub const RESIDUAL_IDX: u32 = 48;
     pub const REDIST_PENDING: u32 = 12;
     pub const RNG: u32 = 13;
     pub const FRAME: u32 = 14;
@@ -106,12 +109,14 @@ pub mod stu {
     pub const RELEASING: u32 = 18;
     /// the last lump id handed out
     pub const LUMP_NEXT: u32 = 19;
-    /// 4 distance + 4 colour "changed this frame" marks (boxes live at 32..64)
+    /// NG distance + NG colour "changed this frame" marks
     pub const DIRTY: u32 = 64;
-    pub const ALL: [(&str, u32); 12] = [
+    /// smoothing boxes: 8 per grid
+    pub const BOXES: u32 = 96;
+    pub const ALL: [(&str, u32); 13] = [
         ("nDebts", N_DEBTS), ("settleFrames", SETTLE_FRAMES), ("residualIdx", RESIDUAL_IDX), ("redistPending", REDIST_PENDING),
         ("rng", RNG), ("frame", FRAME), ("firstColor", FIRST_COLOR), ("spawnLeft", SPAWN_LEFT), ("released", RELEASED),
-        ("releasing", RELEASING), ("lumpNext", LUMP_NEXT), ("dirty", DIRTY),
+        ("releasing", RELEASING), ("lumpNext", LUMP_NEXT), ("dirty", DIRTY), ("boxes", BOXES),
     ];
 }
 pub mod cnt {
@@ -136,7 +141,8 @@ impl Layout {
         let mut grids = Vec::new();
         let mut off = 0;
         let mut bin_off = 0;
-        for (k, g) in sim.grids.iter().chain(std::iter::once(&sim.content)).enumerate() {
+        // GPU order: the bowls, the scoop (3)
+        for (k, g) in sim.grids.iter().chain([&sim.content]).enumerate() {
             let n = [g.nx as u32, g.ny as u32, g.nz as u32];
             let bins = n.map(|v| v.div_ceil(BIN));
             let mut info = GridInfo { o: [g.ox, g.oy, g.oz], c: g.cell, n, count: g.n as u32, off, band: g.band, bins, bin_off: 0 };
@@ -168,17 +174,20 @@ impl Layout {
             ("CS", TABLE + 1), ("NB", MAXN * CAP), ("SRGBA", MAX_SPILLED), ("DEBTU", 3 * MAX_DEBTS), ("STU", 256),
             ("SCANU", maxr), ("PRE", maxr), ("BINL", nbins),
         ]);
-        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", 4 * 8), ("SMB", 4 * 8)]);
+        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", NG as u32 * 8), ("SMB", NG as u32 * 8)]);
         Layout { grids, n, nc, maxr, nbins, w, x, a }
     }
 
-    /// Packed grids for streaming: per grid, distance rows then colour rows, 64 u32 per row.
+    /// Packed grids (for the renderer, or to read back): per grid, distance rows (r8, 4 voxels per u32)
+    /// then colour rows (rgba8, 1 per u32), each row padded to a multiple of 256 bytes (what
+    /// copy_buffer_to_texture wants). Offsets in u32, total size in u32.
     pub fn pack_offsets(&self) -> (Vec<u32>, u32) {
         let mut offs = Vec::new();
         let mut at = 0;
         for g in &self.grids {
             offs.push(at);
-            at += 2 * g.n[1] * g.n[2] * 64;
+            let (dw, cw) = pack_row_words(g.n[0]);
+            at += g.n[1] * g.n[2] * (dw + cw);
         }
         (offs, at)
     }
@@ -209,7 +218,7 @@ impl Layout {
         let h = &SPOON.handle;
         let g = &self.grids;
         s += &format!(
-            "const CAP: u32 = {CAP}u;\nconst MAX_LUMPS: u32 = {MAX_LUMPS}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
+            "const NG: u32 = {NG}u;\nconst CAP: u32 = {CAP}u;\nconst MAX_LUMPS: u32 = {MAX_LUMPS}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
              const MAX_SPILLED: u32 = {MAX_SPILLED}u;\nconst MAX_DEBTS: u32 = {MAX_DEBTS}u;\nconst NBINS: u32 = {}u;\n\
              const BIN: u32 = {BIN}u;\nconst VOL_UNIT: f32 = {};\nconst NC: u32 = {}u;\nconst BIG: f32 = 1e9;\n\n",
             TABLE - 1,
@@ -231,16 +240,16 @@ impl Layout {
         s += &format!("const KEEP_LO: vec3f = vec3f({}, {}, {});\nconst KEEP_HI: vec3f = vec3f({}, {}, {});\n", f(lo[0]), f(lo[1]), f(lo[2]), f(hi[0]), f(hi[1]), f(hi[2]));
         let join = |v: Vec<String>| v.join(", ");
         s += &format!(
-            "\nvar<private> GO: array<vec4f, 4> = array({});\n",
+            "\nvar<private> GO: array<vec4f, NG> = array({});\n",
             join(g.iter().map(|g| format!("vec4f({}, {}, {}, {})", f(g.o[0]), f(g.o[1]), f(g.o[2]), f(g.c))).collect())
         );
         s += &format!(
-            "var<private> GN: array<vec4u, 4> = array({});\n",
+            "var<private> GN: array<vec4u, NG> = array({});\n",
             join(g.iter().map(|g| format!("vec4u({}u, {}u, {}u, {}u)", g.n[0], g.n[1], g.n[2], g.off)).collect())
         );
-        s += &format!("var<private> GBAND: array<f32, 4> = array({});\n", join(g.iter().map(|g| f(g.band)).collect()));
+        s += &format!("var<private> GBAND: array<f32, NG> = array({});\n", join(g.iter().map(|g| f(g.band)).collect()));
         s += &format!(
-            "var<private> GBINS: array<vec4u, 4> = array({});\n",
+            "var<private> GBINS: array<vec4u, NG> = array({});\n",
             join(g.iter().map(|g| format!("vec4u({}u, {}u, {}u, {}u)", g.bins[0], g.bins[1], g.bins[2], g.bin_off)).collect())
         );
         s += &format!("const NHANDLE: u32 = {}u;\n", h.len());
@@ -251,6 +260,14 @@ impl Layout {
         );
         s
     }
+}
+
+/// Grids on the GPU: the three bowls, the scoop.
+pub const NG: usize = 4;
+
+/// u32 words per packed row of a grid `nx` voxels wide: (distance, colour), multiples of 64 (256 bytes).
+pub fn pack_row_words(nx: u32) -> (u32, u32) {
+    (nx.div_ceil(4).div_ceil(64) * 64, nx.div_ceil(64) * 64)
 }
 
 /// The whole shader: generated header, shared helpers, then every kernel.

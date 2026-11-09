@@ -135,8 +135,8 @@ fn lap(g: u32, idx: u32, c: vec3u) -> f32 {
           W[b + select(idx, idx - n.x, c.y > 0u)] + W[b + select(idx, idx + n.x, c.y < n.y - 1u)] +
           W[b + select(idx, idx - sxy, c.z > 0u)] + W[b + select(idx, idx + sxy, c.z < n.z - 1u)]) / 6.0;
 }
-fn boxGet(g: u32, k: u32) -> i32 { return bitcast<i32>(X[X_STU + 32u + g * 8u + k]); }
-fn boxSet(g: u32, k: u32, v: i32) { X[X_STU + 32u + g * 8u + k] = bitcast<u32>(v); }
+fn boxGet(g: u32, k: u32) -> i32 { return bitcast<i32>(X[X_STU + SU_boxes + g * 8u + k]); }
+fn boxSet(g: u32, k: u32, v: i32) { X[X_STU + SU_boxes + g * 8u + k] = bitcast<u32>(v); }
 
 /**
  * _writeVolumePreserving over LIST/TS[base .. base+n): values T - shift (at least TF) with the uniform
@@ -403,8 +403,9 @@ fn clampContent(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) 
 }
 
 // ================================================================ render textures
-// One u32 per 4 voxels of a row for the r8 distance texture, one per voxel for rgba8; rows padded to
-// 256 bytes (as the browser's copyBufferToTexture wanted; the server unpads them). P.i0 = (grid, pack offset in u32, 0, 0).
+// One u32 per 4 voxels of a row for the r8 distance texture, one per voxel for rgba8; rows padded to a
+// multiple of 256 bytes (what copy_buffer_to_texture wants). P.i0 = (grid, pack offset in u32, distance
+// words per row, colour words per row); 64 threads per row.
 @group(0) @binding(6) var<storage, read_write> PK: array<u32>;
 @compute @workgroup_size(64)
 fn packGrid(@builtin(global_invocation_id) id: vec3u) {
@@ -416,20 +417,24 @@ fn packGrid(@builtin(global_invocation_id) id: vec3u) {
   if (row >= rows) { return; }
   let base = n.w + row * n.x;
   let s = 127.5 / GBAND[g];
-  // distance: 4 voxels per u32 (16 u32 per 64-byte... row padded to 64 u32 = 256 bytes)
-  if (w * 4u < n.x) {
+  let dw = u32(P.i0.z);
+  let cw = u32(P.i0.w);
+  // distance: 4 voxels per u32
+  for (var q = w; q < dw; q += 64u) {
     var word = 0u;
     for (var e = 0u; e < 4u; e++) {
-      let x = w * 4u + e;
+      let x = q * 4u + e;
       if (x < n.x) {
         let qv = clamp(W[W_D + base + x] * s + 127.5, 0.0, 255.0);
         word |= u32(qv) << (8u * e);
       }
     }
-    PK[u32(P.i0.y) + row * 64u + w] = word;
+    PK[u32(P.i0.y) + row * dw + q] = word;
   }
-  // colour: rows of 64 voxels x 4 bytes = 256 bytes, after the distance rows
-  if (w < n.x) {
-    PK[u32(P.i0.y) + rows * 64u + row * 64u + w] = X[X_COL + base + w];
+  // colour: one u32 per voxel, after the distance rows
+  for (var q = w; q < cw; q += 64u) {
+    var c = 0u;
+    if (q < n.x) { c = X[X_COL + base + q]; }
+    PK[u32(P.i0.y) + rows * dw + row * cw + q] = c;
   }
 }
