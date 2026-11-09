@@ -1,4 +1,4 @@
-name: Rust core and server
+name: Rust
 
 on:
   push:
@@ -22,28 +22,11 @@ jobs:
         with:
           workspaces: rust
 
-      # no GPU on the runners: the GPU-vs-CPU tests say so and pass, the server falls back to the CPU
-      - name: Test (collision, mass conservation, arm, fixture regression, WebSocket server)
+      # no GPU on the runners: the GPU and rendering tests say so and pass, the server falls back to the CPU
+      - name: Test (collision, mass conservation, arm, fixture regression, control server)
         working-directory: rust
         run: cargo test --release
 
       - name: Benchmark
         working-directory: rust
         run: cargo run --release -q -p icecream-cli -- bench
-
-  viewer:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-
-      - name: Build the viewer
-        run: |
-          npm ci
-          npm run build

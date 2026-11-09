@@ -1,9 +1,9 @@
 """Example external controller for the ice-cream digital twin (as a ROS bridge node would be).
 
-The simulation runs in the Rust server (`icecream web`, started by `just dev`); this script connects to
-it like the browser does, asks for a state stream in ROS REP-103 coordinates (x forward, y left, z up,
-metres; quaternions [x, y, z, w]) and scoops vanilla, lifts, "eats", then scoops mint. Open the page
-alongside to watch it.
+The simulation runs in `icecream app` (the window) or `icecream server` (headless); this script connects to
+it, asks for a state stream in ROS REP-103 coordinates (x forward, y left, z up,
+metres; quaternions [x, y, z, w]) and scoops vanilla, lifts, "eats", then scoops mint. Run it next to
+`icecream app` to watch it.
 
     uv run --with websockets tools/ws_example_client.py [ws://localhost:8765/ws]
 """

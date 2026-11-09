@@ -3,9 +3,9 @@
     uv run --with trimesh --with pymeshlab --with numpy --with scipy --with networkx tools/so101_assets.py
 
 Writes
-  public/so101/so101.bin   decimated meshes, one per (link, material): f32 [px py pz nx ny nz]* + u32 indices
-  public/so101/so101.json  where each mesh lives in the .bin, plus the source commit and licence
-  public/so101/LICENSE     the SO-ARM100 licence (Apache-2.0), shipped next to the meshes
+  rust/view/assets/so101/so101.bin   decimated meshes, one per (link, material): f32 [px py pz nx ny nz]* + u32 indices
+  rust/view/assets/so101/so101.json  where each mesh lives in the .bin, plus the source commit and licence
+  rust/view/assets/so101/LICENSE     the SO-ARM100 licence (Apache-2.0), shipped next to the meshes
   rust/core/src/robot/urdf.rs  the kinematic chain (joints, origins, axes, limits) read from the URDF
 
 Visual origins are baked into the vertices, so every mesh is already in its link's frame.
@@ -124,7 +124,7 @@ def main():
         if entries:
             index[name] = entries
 
-    out = ROOT / "public" / "so101"
+    out = ROOT / "rust" / "view" / "assets" / "so101"
     out.mkdir(parents=True, exist_ok=True)
     (out / "so101.bin").write_bytes(b"".join(blobs))
     meta = {

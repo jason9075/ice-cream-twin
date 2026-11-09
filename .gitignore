@@ -1,6 +1,4 @@
-node_modules
-dist
-*.png
-shots
 rust/target
+shots
+*.png
 .cache
