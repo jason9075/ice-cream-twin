@@ -4,7 +4,8 @@
 use icecream_core::math::{Quat, Vec3};
 use icecream_core::robot::Arm;
 use icecream_core::{Params, Sim, State, Twin};
-use icecream_gpu::GpuTwin;
+use icecream_gpu::{wgpu, GpuSim, GpuTwin};
+use std::sync::Arc;
 
 /// One SDF volume as the viewer's textures hold it (r8 distances, rgba8 colours).
 pub struct GridView<'a> {
@@ -15,7 +16,7 @@ pub struct GridView<'a> {
     pub color_changed: bool,
 }
 
-/// What the server streams after a frame.
+/// The CPU simulation's ice for the renderer.
 pub struct View<'a> {
     pub grids: Vec<GridView<'a>>,
     /// n x (f32 x, y, z, u32 rgba)
@@ -48,9 +49,13 @@ pub trait Engine: Send {
     }
     fn set_params(&mut self, p: Params);
     fn state(&self) -> State;
-    /// Start keeping what `view` returns up to date (the GPU reads it back only when asked to).
-    fn set_streaming(&mut self, _on: bool) {}
+    /// The CPU simulation's ice as the renderer's textures hold it (and which grids changed since the
+    /// last call). The GPU simulation leaves its ice on the GPU instead (`gpu`).
     fn view(&mut self) -> View<'_>;
+    /// The GPU simulation, when that is what runs.
+    fn gpu(&mut self) -> Option<&mut GpuSim> {
+        None
+    }
 }
 
 fn particle_bytes(pos: &[f32], rgba: &[u8], n: usize) -> Vec<u8> {
@@ -107,6 +112,7 @@ impl Engine for Twin {
     }
     fn view(&mut self) -> View<'_> {
         let s = &mut self.sim;
+        // renderer order: the bowls, the scoop
         let mut changed = [(false, false); 4];
         for (k, c) in changed.iter_mut().enumerate() {
             let g = if k < 3 { &mut s.grids[k] } else { &mut s.content };
@@ -173,15 +179,14 @@ impl Engine for GpuTwin {
     fn state(&self) -> State {
         self.sim.state()
     }
-    fn set_streaming(&mut self, on: bool) {
-        self.sim.stream = on;
-        self.sim.refresh(); // so the very first view already has the grids
+    fn gpu(&mut self) -> Option<&mut GpuSim> {
+        Some(&mut self.sim)
     }
     fn view(&mut self) -> View<'_> {
         let dist_changed = std::mem::take(&mut self.sim.dist_dirty);
         let color_changed = std::mem::take(&mut self.sim.color_dirty);
         let s = &self.sim;
-        let grids = (0..4)
+        let grids = (0..s.l.grids.len())
             .map(|k| {
                 let g = &s.l.grids[k];
                 GridView {
@@ -199,7 +204,16 @@ impl Engine for GpuTwin {
 
 /// The GPU simulation if there is a GPU (unless `cpu`), else the CPU one. Says which on stderr.
 pub fn open(cpu: bool) -> Box<dyn Engine> {
-    if !cpu {
+    open_on(cpu, None)
+}
+
+/// As `open`, on a device someone else made (the app shares it with its renderer): device, queue, name.
+pub fn open_on(cpu: bool, device: Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>, String)>) -> Box<dyn Engine> {
+    if let (false, Some((d, q, name))) = (cpu, device.clone()) {
+        eprintln!("simulation: GPU ({name})");
+        return Box::new(GpuTwin::with_device(Params::default(), d, q, name));
+    }
+    if !cpu && device.is_none() {
         match GpuTwin::new(Params::default()) {
             Ok(t) => {
                 eprintln!("simulation: GPU ({})", t.sim.adapter);
@@ -207,7 +221,7 @@ pub fn open(cpu: bool) -> Box<dyn Engine> {
             }
             Err(e) => eprintln!("simulation: no GPU ({e}), running on the CPU"),
         }
-    } else {
+    } else if cpu {
         eprintln!("simulation: CPU");
     }
     Box::new(Twin::default())

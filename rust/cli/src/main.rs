@@ -1,14 +1,19 @@
-//! Headless ice-cream digital twin.
+//! The ice-cream digital twin.
 //!
 //! ```text
-//! icecream web [--port 8765] [--dist DIR] [--paused] [--cpu]
-//!                       the simulation as a server: browsers draw it over a WebSocket (/ws), and
-//!                       --dist serves the built page too (see web.rs for the protocol). Runs on the
-//!                       GPU when there is one (wgpu), --cpu forces the CPU version
+//! icecream app [--port 8765 | --no-control] [--paused] [--cpu]
+//!                       the twin in a window: simulation and drawing on one GPU, a side panel, mouse
+//!                       and keys; the control server (WebSocket, control.rs) runs alongside
+//! icecream server [--port 8765] [--paused] [--cpu]
+//!                       headless: the simulation in real time, controlled over the WebSocket only
+//! icecream shot [DIR] [--cpu]
+//!                       a scripted session rendered off screen to PNGs (default DIR: shots)
 //! icecream serve [--gpu] JSON lines on stdin -> JSON lines on stdout (same commands; for ROS nodes,
 //!                       Python, test rigs); CPU by default
 //! icecream bench        the scoop + plunge scenarios on the CPU, and a scoop on the GPU if there is one
 //! ```
+//!
+//! The simulation runs on the GPU when there is one (wgpu); --cpu forces the CPU version.
 //!
 //! Commands are listed in protocol.rs. `serve` also takes `{"type":"config","frame":"ros","arm":true}`:
 //! the default frame for replies and targets, and whether the SO-101 holds the spoon (on by default).
@@ -17,7 +22,7 @@ use icecream_core::math::{Quat, Vec3};
 use icecream_core::sdf::bowls;
 use icecream_core::{Sim, Twin};
 use icecream_cli::protocol::{frame_of, handle, twin_state, Frame};
-use icecream_cli::web;
+use icecream_cli::{app, control, shot};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
@@ -143,30 +148,17 @@ fn bench() {
     }
 }
 
-fn web(args: &[String]) {
-    let mut opts = web::Options { port: 8765, dist: None, paused: false, cpu: false };
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--port" => opts.port = it.next().and_then(|p| p.parse().ok()).expect("--port N"),
-            "--dist" => opts.dist = Some(it.next().expect("--dist DIR").into()),
-            "--paused" => opts.paused = true,
-            "--cpu" => opts.cpu = true,
-            other => {
-                eprintln!("unknown option {other}");
-                std::process::exit(2);
-            }
-        }
-    }
+fn flag_port(args: &[String]) -> Option<u16> {
+    let k = args.iter().position(|a| a == "--port")?;
+    Some(args.get(k + 1).and_then(|p| p.parse().ok()).expect("--port N"))
+}
+
+fn server(args: &[String]) {
+    let opts = control::Options { port: flag_port(args).unwrap_or(8765), paused: args.iter().any(|a| a == "--paused"), cpu: args.iter().any(|a| a == "--cpu") };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
-        let has_page = opts.dist.is_some();
-        let (addr, server) = web::start(opts).await.expect("bind");
-        if has_page {
-            eprintln!("icecream web: http://localhost:{}/ (WebSocket /ws)", addr.port());
-        } else {
-            eprintln!("icecream web: ws://localhost:{}/ws", addr.port());
-        }
+        let (addr, server) = control::start(opts).await.expect("bind");
+        eprintln!("icecream server: ws://localhost:{}/ws", addr.port());
         server.await.expect("server");
     });
 }
@@ -174,11 +166,20 @@ fn web(args: &[String]) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
-        Some("web") => web(&args[2..]),
+        Some("app") => {
+            let rest = &args[2..];
+            let port = if rest.iter().any(|a| a == "--no-control") { None } else { Some(flag_port(rest).unwrap_or(8765)) };
+            app::run(app::Options { port, paused: rest.iter().any(|a| a == "--paused"), cpu: rest.iter().any(|a| a == "--cpu") });
+        }
+        Some("server") => server(&args[2..]),
+        Some("shot") => {
+            let dir = args.iter().skip(2).find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "shots".into());
+            shot::run(std::path::Path::new(&dir), args.iter().any(|a| a == "--cpu"));
+        }
         Some("serve") => serve(args.iter().any(|a| a == "--gpu")),
         Some("bench") => bench(),
         _ => {
-            eprintln!("usage: icecream web [--port N] [--dist DIR] [--paused] [--cpu] | serve [--gpu] | bench");
+            eprintln!("usage: icecream app [--port N | --no-control] [--paused] [--cpu] | server [--port N] [--paused] [--cpu] | shot [DIR] [--cpu] | serve [--gpu] | bench");
             std::process::exit(2);
         }
     }

@@ -1,5 +1,10 @@
-//! The ice-cream twin as a service: the JSON protocol and the WebSocket server behind `icecream web`, over
-//! the simulation on the GPU (icecream-gpu) or the CPU (icecream-core).
+//! The ice-cream twin: the JSON protocol, the control server, the window app and the off-screen
+//! screenshots, over the simulation on the GPU (icecream-gpu) or the CPU (icecream-core), drawn by
+//! icecream-view.
+pub mod app;
+pub mod control;
 pub mod engine;
 pub mod protocol;
-pub mod web;
+pub mod scene;
+pub mod shot;
+pub mod ui;
