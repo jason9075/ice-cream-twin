@@ -180,7 +180,7 @@ impl Layout {
             ("CS", TABLE + 1), ("NB", MAXN * CAP), ("SRGBA", MAX_SPILLED), ("DEBTU", 3 * MAX_DEBTS), ("STU", 256),
             ("SCANU", maxr), ("PRE", maxr), ("BINL", nbins),
         ]);
-        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", NG as u32 * 8), ("SMB", NG as u32 * 8), ("TABLEOWE", 1)]);
+        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", NG as u32 * 8), ("SMB", NG as u32 * 8), ("TABLEOWE", 1), ("PLOW", nbins)]);
         Layout { grids, n, nc, maxr, nbins, w, x, a }
     }
 

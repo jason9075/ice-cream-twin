@@ -643,7 +643,8 @@ impl GpuSim {
         put(28, [f64::from(u8::from(tilt < ip.release_angle - 10.0)), f64::from(u8::from(ip.accretion)), ip.release_angle, tilt]);
         put(48, [sp.lin_vel.x, sp.lin_vel.y, sp.lin_vel.z, 0.0]);
         put(52, [sp.ang_vel.x, sp.ang_vel.y, sp.ang_vel.z, 0.0]);
-        put(60, [fp.lump_stiffness, fp.lump_yield * r, f64::from(u8::from(ip.smooth_cuts)), 0.0]);
+        let plow = if ip.displaced_to_particles { ip.plow.clamp(0.0, 1.0) } else { 0.0 };
+        put(60, [fp.lump_stiffness, fp.lump_yield * r, f64::from(u8::from(ip.smooth_cuts)), plow]);
         g[32..36].copy_from_slice(&pose.r0);
         g[36..40].copy_from_slice(&pose.r1);
         g[40..44].copy_from_slice(&pose.r2);
@@ -715,6 +716,8 @@ impl GpuSim {
         }
         let (sp_pos, sp_quat) = (self.cpu.spoon.pos, self.cpu.spoon.quat);
         self.interact(&mut fr, sp_pos, sp_quat, true);
+        // what the metal pushed aside near the surface piles up beside the cut (Sim::plow_pay)
+        self.run(&mut fr, "plowPay", 1, Pass::default());
         self.compact(&mut fr);
 
         // cutting force from the volume the last frame's carving removed (read back a frame late)
@@ -1094,6 +1097,9 @@ impl GpuSim {
     }
     pub fn debug_frame_start(&self, fr: &mut Frame) {
         self.run(fr, "frameStart", 1, Pass::default());
+    }
+    pub fn debug_plow(&self, fr: &mut Frame) {
+        self.run(fr, "plowPay", 1, Pass::default());
     }
     pub fn debug_compact(&self, fr: &mut Frame) {
         self.compact(fr);

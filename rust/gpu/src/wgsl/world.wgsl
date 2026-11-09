@@ -162,7 +162,15 @@ fn carveMark(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid
         let isMetal = dS <= dI && dS <= dC;
         let isContentNoAccrete = !isMetal && dC < dI && !accrete;
         if (dv > 0.0) {
-          if (isMetal || isContentNoAccrete) { W[W_DVD + r] = dv; } else { W[W_DVC + r] = dv; }
+          if (isMetal || isContentNoAccrete) {
+            // most of it is plowed aside (a ridge beside the cut, plowPay), the rest flies off (Sim carve)
+            var crumbs = dv;
+            if (g < 3u && G.g8.w > 0.0) {
+              plowBin(g, vcenter(g, c), dv * G.g8.w * cc * cc * cc);
+              crumbs = dv * (1.0 - G.g8.w);
+            }
+            W[W_DVD + r] = crumbs;
+          } else { W[W_DVC + r] = dv; }
         }
       }
     }

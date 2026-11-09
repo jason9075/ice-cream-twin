@@ -23,6 +23,8 @@ const MAX_SPILLED: usize = 8000;
 /// The table around the bowls is an SDF volume too (Claybook: the whole world is one): ice that comes to
 /// rest on it freezes into it, stays solid, is collided with and can be scooped back up. `grids[TABLE]`.
 pub const TABLE: usize = 3;
+/// plowed ice is gathered in bins of BIN³ voxels per bowl grid (the GPU's ledger bins)
+pub const PLOW_BIN: usize = 3;
 /// frames a lump touches the world before it freezes whole
 const LUMP_LANDING_FRAMES: u32 = 6;
 const TABLE_ORIGIN: [f64; 3] = [-0.36, -0.006, -0.2];
@@ -169,6 +171,8 @@ pub struct Sim {
     pub table_owed: f64,
     /// per lump: frames it has been touching the bowls, the table or their ice
     lump_landed: [u32; MAX_LUMPS + 1],
+    /// per bowl grid: m³ plowed into each bin this frame (`plow_pay` piles it beside the cut)
+    plow_bins: [Vec<f64>; 3],
     releasing: bool,
     debts: Vec<Debt>,
     credit: Vec<(GridId, f64)>,
@@ -231,6 +235,7 @@ impl Sim {
             table_volume: 0.0,
             table_owed: 0.0,
             lump_landed: [0; MAX_LUMPS + 1],
+            plow_bins: std::array::from_fn(|_| vec![0.0; WORLD_DIMS.iter().map(|n| n.div_ceil(PLOW_BIN)).product()]),
             releasing: false,
             debts: Vec::new(),
             credit: Vec::new(),
@@ -402,6 +407,7 @@ impl Sim {
         self.substeps = subs;
         self.sync_view();
         self.interact(self.spoon.pos, self.spoon.quat, dt, true);
+        self.plow_pay();
 
         let sp_pos = self.spoon.pos;
         let sp_quat = self.spoon.quat;
@@ -634,6 +640,7 @@ impl Sim {
         let k1 = fl((bx[5] - oz) / c, nz);
         let to_particles = self.params.ice.displaced_to_particles;
         let smooth_cuts = self.params.ice.smooth_cuts;
+        let plow = self.params.ice.plow.clamp(0.0, 1.0);
         let pr = if self.fluid.r > 0.0 { self.fluid.r } else { self.params.fluid.particle_radius };
         let vp = 8.0 * pr * pr * pr;
         let mut displaced = 0.0;
@@ -704,7 +711,14 @@ impl Sim {
                         if is_metal || is_content_no_accrete {
                             displaced += dv;
                             if to_particles {
-                                self.displaced_acc += dv;
+                                // most of it is plowed aside (a ridge beside the cut), the rest flies off
+                                let plowed = if gi < TABLE { dv * plow } else { 0.0 };
+                                if plowed > 0.0 {
+                                    let b = PLOW_BIN as i64;
+                                    let bn = [nx.div_ceil(PLOW_BIN) as i64, ny.div_ceil(PLOW_BIN) as i64];
+                                    self.plow_bins[gi][((i / b) + bn[0] * ((j / b) + bn[1] * (k / b))) as usize] += plowed;
+                                }
+                                self.displaced_acc += dv - plowed;
                                 while self.displaced_acc >= vp {
                                     self.displaced_acc -= vp;
                                     if !self.spawn_displaced(lx, ly, lz, gi, idx, handle_only, pr) {
@@ -759,6 +773,49 @@ impl Sim {
         self.scratch_c = col;
         self.fluid.spawn(w[0], w[1], w[2], v[0], v[1], v[2], col);
         true
+    }
+
+    /// Pile the ice plowed this frame beside the cut: per bin, walk from its centre away from the spoon
+    /// (horizontally) until a stamp of its volume on top of the ice there is clear of the spoon, and stamp
+    /// it on the surface. What a stamp doesn't add (or can't be placed) goes to the ledger.
+    pub fn plow_pay(&mut self) {
+        self.set_pose(self.spoon.pos, self.spoon.quat);
+        let pose = self.pose;
+        let tilted = Sim::tilt_deg_of(self.spoon.quat) > self.params.ice.release_angle;
+        let k = self.params.fluid.stamp_smooth;
+        for gi in 0..3 {
+            for bi in 0..self.plow_bins[gi].len() {
+                let vol = std::mem::take(&mut self.plow_bins[gi][bi]);
+                if vol <= 0.0 {
+                    continue;
+                }
+                let g = &self.grids[gi];
+                let (c, b) = (g.cell, PLOW_BIN);
+                let bn = [g.nx.div_ceil(b), g.ny.div_ceil(b)];
+                let (bx, by, bz) = (bi % bn[0], (bi / bn[0]) % bn[1], bi / (bn[0] * bn[1]));
+                let ctr = [
+                    g.ox + ((bx * b) as f64 + 1.5) * c,
+                    g.oy + ((by * b) as f64 + 1.5) * c,
+                    g.oz + ((bz * b) as f64 + 1.5) * c,
+                ];
+                let r = (3.0 * vol / (4.0 * PI)).cbrt();
+                let spot = plow_spot(g, &pose, &self.content, tilted, ctr, r);
+                let mut col = [0u8; 4];
+                if let Some(vi) = g.voxel_at(ctr[0], ctr[1], ctr[2]) {
+                    col.copy_from_slice(&g.color[vi * 4..vi * 4 + 4]);
+                } else {
+                    col = self.flavor_rgba[gi];
+                }
+                self.scratch_c = col;
+                match spot {
+                    Some(p) => {
+                        let added = self.grids[gi].stamp_sphere(p[0], p[1], p[2], r, k, Some(col));
+                        self.settle(GridId::Bowl(gi), p[0], p[1], p[2], vol - added, col);
+                    }
+                    None => self.owe(GridId::Bowl(gi), ctr[0], ctr[1], ctr[2], vol, col),
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ volume ledger
@@ -1682,4 +1739,49 @@ pub fn keep_out_box(co: [f64; 3], cs: [f64; 3], pad: f64) -> ([f64; 3], [f64; 3]
         hi[k] = hi[k].max(co[k] + cs[k]) + pad;
     }
     (lo, hi)
+}
+
+/// Where plowed ice from around `ctr` lands: walking from it horizontally away from the spoon in half
+/// cells, the first column whose ice top has a ball of radius `r` on it clear of the spoon (what carving
+/// cuts, `spoon_keep_out`). Only ice pushed aside near the surface piles up beside the cut (a column top at
+/// most two cells above where it came from): what the spoon presses down deep is packed away through the
+/// ledger instead, and a ridge never builds on top of itself. None if there is no such spot within 6 cm.
+fn plow_spot(g: &SdfGrid, pose: &Pose, content: &SdfGrid, tilted: bool, ctr: [f64; 3], r: f64) -> Option<[f64; 3]> {
+    let c = g.cell;
+    let (mut dx, mut dz) = (ctr[0] - pose.t[0], ctr[2] - pose.t[2]);
+    let l = (dx * dx + dz * dz).sqrt();
+    if l < 1e-6 {
+        (dx, dz) = (1.0, 0.0);
+    } else {
+        (dx, dz) = (dx / l, dz / l);
+    }
+    let pad = 0.4 * c;
+    let clear = |p: [f64; 3]| {
+        let [lx, ly, lz] = pose.to_local(p[0], p[1], p[2]);
+        let mut d = (sd_spoon_shell(lx, ly, lz) - pad).min(sd_handle(lx, ly, lz) - pad);
+        let cs = content.sample(lx, ly, lz);
+        if cs < content.band * 0.999 {
+            d = d.min(cs);
+        }
+        if !tilted {
+            d = d.min(sd_hull_interior(lx, ly, lz));
+        }
+        d > r + c
+    };
+    for step in 0..48 {
+        let t = step as f64 * 0.5 * c;
+        let (x, z) = (ctr[0] + dx * t, ctr[2] + dz * t);
+        let top = Sim::column_top(g, x, z);
+        if top.is_nan() {
+            continue;
+        }
+        if top > ctr[1] + 2.0 * c {
+            return None;
+        }
+        let p = [x, top, z];
+        if top < g.oy + g.sy - 2.0 * c && clear(p) {
+            return Some(p);
+        }
+    }
+    None
 }

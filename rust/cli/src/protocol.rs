@@ -123,7 +123,7 @@ pub fn params_json(p: &Params) -> Value {
         "ice": {
             "hardness": ice.hardness, "accretion": ice.accretion, "accretionDist": ice.accretion_dist,
             "capacity": ice.capacity, "releaseAngle": ice.release_angle, "displacedToParticles": ice.displaced_to_particles,
-            "density": ice.density, "smoothing": ice.smoothing, "bowlSmoothing": ice.bowl_smoothing, "smoothCuts": ice.smooth_cuts,
+            "density": ice.density, "smoothing": ice.smoothing, "bowlSmoothing": ice.bowl_smoothing, "plow": ice.plow, "smoothCuts": ice.smooth_cuts,
             "shape": match ice.shape { FillShape::Scoops => "scoops", FillShape::Flat => "flat", FillShape::Mound => "mound" },
         },
         "spoon": {
@@ -169,6 +169,7 @@ pub fn apply_params(p: &mut Params, patch: &Value) -> Result<(), String> {
                 ("ice", "density") => ice.density = num()?,
                 ("ice", "smoothing") => ice.smoothing = num()?,
                 ("ice", "bowlSmoothing") => ice.bowl_smoothing = num()?,
+                ("ice", "plow") => ice.plow = num()?.clamp(0.0, 1.0),
                 ("ice", "smoothCuts") => ice.smooth_cuts = flag()?,
                 ("ice", "shape") => {
                     ice.shape = match v.as_str() {

@@ -14,7 +14,7 @@ struct Globals {
   R0: vec4f, R1: vec4f, R2: vec4f, T: vec4f, // spoon pose after the spoon step (rows of R, position)
   lin: vec4f, ang: vec4f,                    // spoon velocity
   u0: vec4u,                                 // frame, spawn budget, debt stamps per frame, max debts
-  g8: vec4f,                                 // lumpStiffness, lumpYield (m), smoothCuts
+  g8: vec4f,                                 // lumpStiffness, lumpYield (m), smoothCuts, plow
 }
 struct Pass {
   i0: vec4i, i1: vec4i, i2: vec4i, i3: vec4i,
@@ -261,6 +261,13 @@ fn wgMaxI(t: u32, v: i32) -> i32 {
 
 // ---------------------------------------------------------------- ledger primitives
 /** Owe vol m³ at world point p of bowl grid g: into the fixed-point bin there (atomic). */
+/** Plowed ice (m³) from around p, for plowPay: the same bins as the ledger's, a separate tally. */
+fn plowBin(g: u32, p: vec3f, vol: f32) {
+  if (vol <= 0.0) { return; }
+  let bn = GBINS[g];
+  let c = clamp(vec3i(floor((p - GO[g].xyz) / (GO[g].w * f32(BIN)))), vec3i(0), vec3i(bn.xyz) - 1);
+  atomicAdd(&A[A_PLOW + bn.w + u32(c.x) + bn.x * (u32(c.y) + bn.y * u32(c.z))], u32(round(vol / VOL_UNIT)));
+}
 fn oweBin(g: u32, p: vec3f, vol: f32) {
   if (vol <= 0.0) { return; }
   // the table has no bowl to pile into: its own ice makes up for it (folded into S_tableOwed)

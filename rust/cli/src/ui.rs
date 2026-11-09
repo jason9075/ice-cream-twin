@@ -323,6 +323,7 @@ fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
         ui.add(egui::Slider::new(&mut i.capacity, 5.0..=60.0).text("capacity (cm³)"));
         ui.add(egui::Slider::new(&mut i.release_angle, 60.0..=180.0).text("slide-off tilt (°)"));
         ui.checkbox(&mut i.displaced_to_particles, "displaced → crumbs");
+        ui.add(egui::Slider::new(&mut i.plow, 0.0..=1.0).text("plowed aside (rest: crumbs)"));
         ui.add(egui::Slider::new(&mut i.smoothing, 0.0..=1.0).text("scoop smoothing"));
         ui.add(egui::Slider::new(&mut i.bowl_smoothing, 0.0..=1.0).text("bowl smoothing"));
         ui.checkbox(&mut i.smooth_cuts, "smooth cut edges too");

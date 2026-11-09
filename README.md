@@ -56,7 +56,12 @@ Ice cream exists in two forms that convert into each other:
 
 - **Scooping**: the spoon's metal cuts the bowl SDF. Ice inside the cup is **copied** into the spoon's SDF,
   so pressing in and lifting gives a scoop. Ice already on the spoon picks up more ice in the direction of
-  travel (accretion), which gives the curl. Ice pushed aside by the metal becomes particles.
+  travel (accretion), which gives the curl. Ice pushed aside by the metal is mostly **plowed**: gathered
+  per 3×3×3-voxel bin, then each bin walks horizontally away from the spoon to the first ice top where a
+  ball of its volume is clear of the spoon, and is stamped there, so it piles up beside the cut as a ridge.
+  Only ice pushed aside near the surface piles up (a ridge never builds on itself); what the spoon presses
+  down deep is packed away through the ledger (real ice cream is half air and compresses). The rest
+  (`ice.plow` = 0.9 plowed, 10 % by default) flies off as crumbs.
 - **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
   into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`). That
   works anywhere there is a grid: in a bowl, or **on the table** (Claybook's whole world is one SDF; here
@@ -128,12 +133,13 @@ uses the previous frame's carving.
   | prefix scans, volume reduction | exact (u32), < 10⁻⁵ (f32) |
   | volume-preserving smoothing + settling of 2,111 edited voxels, the spoon in them | max difference 5·10⁻⁶ cell |
   | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
-  | scoop, carry, eat (510 frames) | 19.4 g scooped (CPU 18.5 g), mass drift 0.009 g |
-  | straight down into each bowl, held, lifted | held: no gain; lifted out 17.4 / 5.2 / 12.6 g (CPU 14.6 / 4.5 / 14.8 g) |
-  | tip-out | scoop gone, ~1,350 particles, frozen back 4 s later, drift 0.01 g |
-  | a scoop released on a level spoon | stays in the cup as one lump (10.5 → 10.4 mm tall after 20 frames) |
-  | a scoop dropped on the table | freezes into the table grid (GPU 12.2 g of 14.7, 4 crumbs), scraped back up 2.7 g (CPU 2.4) |
-  | three plunges into the same hole + eat | 31.4 g eaten, drift 0.01 g |
+  | 61 carve steps, then one plow pass | the plowed ice adds 53.7 cm³ to the bowl (CPU 54.0) |
+  | scoop, carry, eat (510 frames) | 16.4 g scooped (CPU 12.1 g), mass drift 0.009 g |
+  | straight down into each bowl, held, lifted | held: no gain; lifted out 13.0 / 0.8 / 7.8 g (CPU 10.4 / 2.4 / 9.5 g) |
+  | tip-out | scoop gone, ~870 particles, frozen back 4 s later, drift 0.2 g |
+  | a dragged scoop released on a level spoon | stays in the cup as one lump (28.8 → 22.1 mm tall after 20 frames) |
+  | a scoop dropped on the table | freezes into the table grid (GPU 9.9 g of 9.7, no crumbs), scraped back up 2.3 g (CPU 2.3) |
+  | three plunges into the same hole + eat | 18.1 g eaten, drift 0.01 g |
   | the SO-101 carrying a GPU scoop | ~12 g, arm within 0.33 mm of the spoon |
   | two identical runs | bit-identical |
 
@@ -315,7 +321,9 @@ tools/                 WebSocket example controller, SO-101 asset conversion
 ## Known limitations
 
 - The GPU and CPU simulations agree closely but not bit for bit (f32, the cutting force a frame late, a few
-  voxels exactly on a test boundary), so long runs drift apart while staying physically the same. The
+  voxels exactly on a test boundary), so long runs drift apart while staying physically the same; ridges
+  plowed beside a cut feed back into later carving, so whole scoops can differ by a third. The
+  step-by-step comparisons (carving, plowing, smoothing) agree to a few cells. The
   fixture regression and the CPU tests pin the CPU version; the GPU one is checked against it with
   tolerances. Particles are capped at 5000 by default (*max particles*, up to 15,000).
 - Each GPU frame waits for its read-back (~0.3 ms on this machine); overlapping frame N's read-back with

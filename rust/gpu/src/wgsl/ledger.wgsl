@@ -380,3 +380,88 @@ fn ledgerStats(@builtin(local_invocation_id) lid: vec3u) {
     W[W_ST + S_debtVol] = v;
   }
 }
+
+// ---------------------------------------------------------------- plowing (Sim::plow_pay, one workgroup)
+// Each bin's plowed ice: walk from the bin's centre horizontally away from the spoon until a ball of its
+// volume on the ice top there is clear of the spoon, and stamp it there. Only ice pushed aside near the
+// surface piles up (a column top at most two cells above the bin); else, or if nothing within 6 cm is
+// clear, it goes to the ledger.
+var<workgroup> plCount: u32;
+var<workgroup> plSpot: vec4f;  // xyz, w = found
+var<workgroup> plInfo: vec4f;  // volume, radius, grid
+var<workgroup> plRGBA: u32;
+
+fn plowClear(p: vec3f, r: f32, c: f32) -> bool {
+  let l = toLocal(G.R0, G.R1, G.R2, G.T, p);
+  let pad = 0.4 * c;
+  var d = min(sdShell(l) - pad, sdHandle(l) - pad);
+  let cs = gsample(3u, l);
+  if (cs < GBAND[3] * 0.999) { d = min(d, cs); }
+  if (G.g7.w <= G.g7.z) { d = min(d, sdHull(l)); }
+  return d > r + c;
+}
+fn plowSpot(g: u32, ctr: vec3f, r: f32) -> vec4f {
+  let c = GO[g].w;
+  var dir = vec2f(ctr.x - G.T.x, ctr.z - G.T.z);
+  let l = length(dir);
+  dir = select(dir / l, vec2f(1.0, 0.0), l < 1e-6);
+  for (var s = 0; s < 48; s++) {
+    let t = f32(s) * 0.5 * c;
+    let x = ctr.x + dir.x * t;
+    let z = ctr.z + dir.y * t;
+    let top = columnTop(g, x, z);
+    if (top <= -BIG) { continue; }
+    if (top > ctr.y + 2.0 * c) { return vec4f(0.0); }
+    let p = vec3f(x, top, z);
+    if (top < GO[g].y + gsize(g).y - 2.0 * c && plowClear(p, r, c)) { return vec4f(p, 1.0); }
+  }
+  return vec4f(0.0);
+}
+
+@compute @workgroup_size(256)
+fn plowPay(@builtin(local_invocation_id) lid: vec3u) {
+  let t = lid.x;
+  let chunk = (NBINS + 255u) / 256u;
+  let b0 = min(t * chunk, NBINS);
+  let b1 = min(b0 + chunk, NBINS);
+  var cnt = 0u;
+  for (var b = b0; b < b1; b++) { cnt += select(0u, 1u, atomicLoad(&A[A_PLOW + b]) != 0u); }
+  let sc = wgScanU(t, cnt);
+  var o = sc.x;
+  for (var b = b0; b < b1; b++) {
+    if (atomicLoad(&A[A_PLOW + b]) != 0u) {
+      X[X_BINL + o] = b;
+      o++;
+    }
+  }
+  if (t == 0u) { plCount = sc.y; }
+  storageBarrier();
+  workgroupBarrier();
+  let n = workgroupUniformLoad(&plCount);
+  for (var k = 0u; k < n; k++) {
+    if (t == 0u) {
+      let b = X[X_BINL + k];
+      let vol = f32(atomicExchange(&A[A_PLOW + b], 0u)) * VOL_UNIT;
+      let g = binGrid(b);
+      let ctr = binCenter(g, b);
+      let r = pow(3.0 * vol / (4.0 * 3.14159265), 1.0 / 3.0);
+      plInfo = vec4f(vol, r, f32(g), 0.0);
+      plRGBA = colorAt(g, ctr);
+      let sp = plowSpot(g, ctr, r);
+      // not found: hand it to the ledger at the bin's centre
+      plSpot = select(vec4f(ctr, 0.0), sp, sp.w > 0.5);
+    }
+    let info = workgroupUniformLoad(&plInfo);
+    let sp = workgroupUniformLoad(&plSpot);
+    let rgba = workgroupUniformLoad(&plRGBA);
+    let g = u32(info.z);
+    if (sp.w > 0.5) {
+      let added = stampCoop(t, g, sp.xyz, info.y, G.g4.w, rgba);
+      if (t == 0u) { settle(g, sp.xyz, info.x - added); }
+    } else if (t == 0u) {
+      oweBin(g, sp.xyz, info.x);
+    }
+    storageBarrier();
+    workgroupBarrier();
+  }
+}

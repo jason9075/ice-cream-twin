@@ -55,6 +55,9 @@ pub struct IceParams {
     /// deg of tilt at which the scoop slides off
     pub release_angle: f64,
     pub displaced_to_particles: bool,
+    /// 0..1: share of the ice the spoon's metal pushes aside that is plowed, piled beside the cut as a
+    /// ridge, instead of flying off as crumbs
+    pub plow: f64,
     /// g/cm³ for the mass readouts
     pub density: f64,
     /// 0..1 Laplacian pass on edited voxels each frame
@@ -118,6 +121,7 @@ impl Default for IceParams {
             capacity: 28.0,
             release_angle: 115.0,
             displaced_to_particles: true,
+            plow: 0.9,
             density: 0.6,
             smoothing: 0.5,
             bowl_smoothing: 1.0,
