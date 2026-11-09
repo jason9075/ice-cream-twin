@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "gpu", "cli"]
+members = ["core", "gpu", "view", "cli"]
 
 [workspace.package]
 edition = "2021"

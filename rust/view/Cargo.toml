@@ -1,0 +1,15 @@
+[package]
+name = "icecream-view"
+version = "0.1.0"
+edition.workspace = true
+description = "Draws the ice-cream twin with wgpu: SDF volumes sphere-traced, the loose particles as one surface, the SO-101"
+
+[lib]
+name = "icecream_view"
+
+[dependencies]
+icecream-core = { path = "../core" }
+wgpu = "22.1"
+bytemuck = "1"
+glam = "0.29"
+serde_json = "1"
