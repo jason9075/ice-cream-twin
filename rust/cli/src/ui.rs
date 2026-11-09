@@ -422,7 +422,7 @@ fn view_ui(ui: &mut egui::Ui, v: &mut ViewOptions, sections: &mut BTreeMap<Strin
         });
         ui.label(RichText::new("Debug").strong());
         egui::ComboBox::from_label("shading").selected_text(format!("{:?}", v.shading)).show_ui(ui, |ui| {
-            for (m, n) in [(Shading::Shaded, "shaded"), (Shading::Normals, "normals"), (Shading::Albedo, "albedo (unlit)"), (Shading::MarchSteps, "march steps")] {
+            for (m, n) in [(Shading::Shaded, "shaded"), (Shading::Normals, "normals"), (Shading::Albedo, "albedo (unlit)"), (Shading::MarchSteps, "march steps"), (Shading::Voxels, "voxels")] {
                 ui.selectable_value(&mut v.shading, m, n);
             }
         });

@@ -38,7 +38,7 @@ fn envColor(r : vec3f, rough : f32) -> vec3f {
   return c;
 }
 
-// debug view (F.lightDir.w): 0 shaded, 1 normals, 2 albedo (unlit), 3 sphere-tracing steps
+// debug view (F.lightDir.w): 0 shaded, 1 normals, 2 albedo (unlit), 3 sphere-tracing steps, 4 voxels
 fn debugMode() -> i32 { return i32(F.lightDir.w + 0.5); }
 fn heat(t : f32) -> vec3f {
   let x = clamp(t, 0.0, 1.0);

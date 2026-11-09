@@ -68,6 +68,7 @@ pub enum Shading {
     Normals = 1,
     Albedo = 2,
     MarchSteps = 3,
+    Voxels = 4,
 }
 
 /// The View panel: drawing only, the simulation never sees it.
@@ -704,7 +705,8 @@ impl Renderer {
         let e = light.extent;
         let light_vp = Mat4::orthographic_rh(-e, e, -e * 0.7, e * 0.7, 0.2, 2.0) * light_view;
         self.write_frame(&self.frame_buf, view_proj, light_vp, camera.eye(), false, light, opts.shading as u32 as f32, opts.ice_matte);
-        self.write_frame(&self.shadow_frame_buf, light_vp, light_vp, eye, true, light, 0.0, false);
+        let shadow_mode = if opts.shading == Shading::Voxels { Shading::Voxels as u32 as f32 } else { 0.0 };
+        self.write_frame(&self.shadow_frame_buf, light_vp, light_vp, eye, true, light, shadow_mode, false);
 
         // the particle surface (compute), when there is one to draw
         let surface = matches!(opts.particles, ParticleMode::Surface | ParticleMode::Both) && self.frame.particles > 0;

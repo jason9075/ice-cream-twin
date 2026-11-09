@@ -115,7 +115,7 @@ pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>, glossy: bo
     }
     // the same frame through the debug options
     type Edit = fn(&mut ViewOptions);
-    let views: [(&str, Edit); 4] = [
+    let views: [(&str, Edit); 5] = [
         ("08-balls.png", |v| v.particles = ParticleMode::Balls),
         ("09-debug-tint.png", |v| {
             v.particles = ParticleMode::Surface;
@@ -128,6 +128,7 @@ pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>, glossy: bo
             v.shading = Shading::Normals;
         }),
         ("11-debug-steps.png", |v| v.shading = Shading::MarchSteps),
+        ("11-debug-voxels.png", |v| v.shading = Shading::Voxels),
     ];
     for (name, set) in views {
         set(&mut s.view);

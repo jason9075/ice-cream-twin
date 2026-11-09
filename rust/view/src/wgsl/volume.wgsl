@@ -42,7 +42,45 @@ fn map(p : vec3f) -> f32 {
   return (textureSampleLevel(sdfTex, samp, p / U.size.xyz, 0.0).r * 2.0 - 1.0) * U.size.w;
 }
 
-struct Hit { ok : bool, p : vec3f, steps : i32 };
+struct Hit { ok : bool, p : vec3f, steps : i32, n : vec3f, voxel : vec3i };
+
+// Traverse actual cells, testing the stored SDF sign without interpolation. This shows the
+// union of occupied cubes, including their true silhouette and depth, rather than a grid overlay.
+fn voxelMarch(ro : vec3f, rd : vec3f, tn : f32, tf : f32, entry : vec3f) -> Hit {
+  var h : Hit;
+  let cell = U.prm.x;
+  let dims = vec3i(round(U.size.xyz / cell));
+  var t = tn;
+  var v = clamp(vec3i(floor((ro + rd * (tn + cell * 0.0001)) / cell)), vec3i(0), dims - 1);
+  let step = select(vec3i(-1), vec3i(1), rd >= vec3f(0.0));
+  let safeDir = vec3f(step) * max(abs(rd), vec3f(1e-9));
+  let boundary = (vec3f(v) + select(vec3f(0.0), vec3f(1.0), rd >= vec3f(0.0))) * cell;
+  var next = select(vec3f(1e30), (boundary - ro) / safeDir, abs(rd) > vec3f(1e-9));
+  let delta = cell / max(abs(rd), vec3f(1e-9));
+  var n = vec3f(0.0, 0.0, -f32(step.z));
+  if (entry.x >= entry.y && entry.x >= entry.z) { n = vec3f(-f32(step.x), 0.0, 0.0); }
+  else if (entry.y >= entry.z) { n = vec3f(0.0, -f32(step.y), 0.0); }
+  for (var i = 0; i < dims.x + dims.y + dims.z; i++) {
+    if (t > tf || any(v < vec3i(0)) || any(v >= dims)) { break; }
+    let d = textureLoad(sdfTex, v, 0).r;
+    if (d < select(0.5, 0.0, FLUID)) {
+      h.ok = true;
+      h.p = ro + rd * t;
+      h.steps = i;
+      h.n = n;
+      h.voxel = v;
+      return h;
+    }
+    t = min(min(next.x, next.y), next.z);
+    let crossed = next <= vec3f(t + cell * 1e-5);
+    if (crossed.x) { n = vec3f(-f32(step.x), 0.0, 0.0); }
+    else if (crossed.y) { n = vec3f(0.0, -f32(step.y), 0.0); }
+    else { n = vec3f(0.0, 0.0, -f32(step.z)); }
+    v += select(vec3i(0), step, crossed);
+    next += select(vec3f(0.0), delta, crossed);
+  }
+  return h;
+}
 
 fn march(lp : vec3f) -> Hit {
   var ro : vec3f;
@@ -54,7 +92,7 @@ fn march(lp : vec3f) -> Hit {
     ro = (U.inv * vec4f(F.camPos.xyz, 1.0)).xyz;
     rd = normalize(lp - ro);
   }
-  let inv = 1.0 / rd;
+  let inv = select(vec3f(-1.0), vec3f(1.0), rd >= vec3f(0.0)) / max(abs(rd), vec3f(1e-9));
   let t0 = -ro * inv;
   let t1 = (U.size.xyz - ro) * inv;
   let tmn = min(t0, t1);
@@ -64,6 +102,7 @@ fn march(lp : vec3f) -> Hit {
   var h : Hit;
   h.ok = false;
   if (tn >= tf) { return h; }
+  if (debugMode() == 4) { return voxelMarch(ro, rd, tn, tf, tmn); }
   let cell = U.prm.x;
   var t = tn;
   for (var i = 0; i < 220; i++) {
@@ -112,6 +151,25 @@ fn microNormal(p : vec3f, n : vec3f) -> vec3f {
   if (!h.ok) { discard; }
   let p = h.p;
   let cell = U.prm.x;
+  if (debugMode() == 4) {
+    let nW = normalize((U.model * vec4f(h.n, 0.0)).xyz);
+    let wp = (U.model * vec4f(p, 1.0)).xyz;
+    var alb = textureLoad(colTex, h.voxel, 0).rgb;
+    if (FLUID && U.size.w > 0.5) { alb = mix(alb, vec3f(0.1, 0.45, 1.0), 0.6); }
+    // Outline the two tangential edges of each face, keeping the native cell size visible.
+    let f = fract(p / cell);
+    let edges = select(min(f, 1.0 - f), vec3f(1.0), abs(h.n) > vec3f(0.5));
+    let edge = min(min(edges.x, edges.y), edges.z);
+    let width = max(fwidth(edge), 0.005);
+    let face = smoothstep(0.035 - width, 0.035 + width, edge);
+    alb *= mix(0.45, 1.0, face);
+    let hemi = mix(GROUND, SKY, 0.5 + 0.5 * nW.y);
+    let lit = hemi + SUN * max(dot(nW, F.lightDir.xyz), 0.0) * shadowAt(wp, nW) * 0.8;
+    var o : FOut;
+    o.depth = depthOf(p);
+    o.color = vec4f(toScreen(alb * lit), 1.0);
+    return o;
+  }
   let e = vec2f(cell * 0.6, 0.0);
   let n = normalize(vec3f(map(p + e.xyy) - map(p - e.xyy),
                           map(p + e.yxy) - map(p - e.yxy),

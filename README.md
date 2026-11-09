@@ -238,9 +238,12 @@ commands a controller sends (`rust/cli/src/ui.rs`). **View** is drawing only:
   sliders (× particle radius).
 - **Show**: crumbs, ice cream in the bowls (and on the table) and on the spoon, bowls, spoon, SO-101, table, target ghost,
   shadows.
-- **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map), matte or the older glossy ice
+- **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map, `voxels`), matte or the older glossy ice
   cream, a blue tint on the particle surface, and translucent boxes for each SDF grid (orange: bowls,
-  green: spoon, purple: table).
+  green: spoon, purple: table). `voxels` draws occupied cells as cubes with face outlines, using the
+  native grid spacing (2.5 mm in bowls/on the table, 1.6 mm on the spoon). The particle surface uses its
+  rendering grid, whose spacing is controlled by the particle surface's voxel slider. Cell traversal
+  replaces interpolation for both visible surfaces and shadows; simulation data stays unchanged.
 
 ## Digital-twin interface
 

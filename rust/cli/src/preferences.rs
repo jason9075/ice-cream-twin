@@ -71,6 +71,7 @@ mod tests {
         let (mut store, mut prefs) = Store::load_path(Some(path.clone()));
         prefs.view.grid_boxes = true;
         prefs.view.surface_radius = 2.0;
+        prefs.view.shading = icecream_view::Shading::Voxels;
         prefs.sections.insert("View".into(), true);
         prefs.sections.insert("Robot arm (SO-101)".into(), false);
         store.save(&prefs.view, &prefs.sections);
@@ -81,6 +82,7 @@ mod tests {
         let (_, loaded) = Store::load_path(Some(path.clone()));
         assert!(loaded.view.grid_boxes);
         assert_eq!(loaded.view.surface_radius, 2.0);
+        assert_eq!(loaded.view.shading, icecream_view::Shading::Voxels);
         assert_eq!(loaded.sections, prefs.sections);
         // Unknown simulation fields must never become persisted preferences.
         std::fs::write(&path, br#"{"fluid":{"gravity":0},"view":{"grid_boxes":true}}"#).unwrap();
