@@ -54,7 +54,7 @@ pub struct FrameState {
     pub particle_radius: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ParticleMode {
     Surface,
     Balls,
@@ -62,7 +62,7 @@ pub enum ParticleMode {
     Hidden,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Shading {
     Shaded = 0,
     Normals = 1,
@@ -71,7 +71,8 @@ pub enum Shading {
 }
 
 /// The View panel: drawing only, the simulation never sees it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ViewOptions {
     pub particles: ParticleMode,
     /// × particle radius

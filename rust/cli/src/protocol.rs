@@ -212,6 +212,7 @@ pub fn scene_json(t: &dyn Engine) -> Value {
 // ---------------------------------------------------------------- commands
 /// Apply one command to the twin. `Ok(Some(reply))` when it answers.
 pub fn handle(t: &mut dyn Engine, msg: &Value, default_frame: Frame) -> Result<Option<Value>, String> {
+    crate::recording::event("command", json!({"message":msg,"defaultFrame":format!("{default_frame:?}")}));
     let ty = msg.get("type").and_then(|t| t.as_str()).ok_or("missing \"type\"")?;
     let f = frame_of(msg, default_frame);
     match ty {

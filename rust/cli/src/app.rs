@@ -49,6 +49,7 @@ struct Gfx {
     light: Light,
     view: ViewOptions,
     panel: Panel,
+    preferences: crate::preferences::Store,
     mods: ModifiersState,
     cursor: (f32, f32),
     drag: Option<Drag>,
@@ -57,7 +58,29 @@ struct Gfx {
     viewport: [f32; 4],
     last: Instant,
     acc: f64,
-    fps: f64,
+    fps: FpsCounter,
+}
+
+/// Count presented frames over wall time; simulation time is clamped separately.
+struct FpsCounter {
+    since: Instant,
+    frames: u64,
+    value: f64,
+}
+
+impl FpsCounter {
+    fn new(now: Instant) -> Self {
+        Self { since: now, frames: 0, value: 0.0 }
+    }
+
+    fn update(&mut self, now: Instant) {
+        let seconds = now.duration_since(self.since).as_secs_f64();
+        if seconds >= 0.5 {
+            self.value = self.frames as f64 / seconds;
+            self.since = now;
+            self.frames = 0;
+        }
+    }
 }
 
 struct App {
@@ -82,9 +105,12 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(g) = self.gfx.as_mut() else { return };
+        if crate::recording::active() && !matches!(&event, WindowEvent::RedrawRequested) {
+            crate::recording::event("window_input", serde_json::json!({"event":format!("{event:?}")}));
+        }
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => { crate::recording::stop(); el.exit(); },
             WindowEvent::Resized(size) => g.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
                 g.frame();
@@ -189,6 +215,9 @@ impl Gfx {
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None);
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
+        let (preferences, saved) = crate::preferences::Store::load();
+        let mut panel = Panel::default();
+        panel.sections = saved.sections;
         window.request_redraw();
         Gfx {
             window,
@@ -206,8 +235,9 @@ impl Gfx {
             egui_renderer,
             camera: OrbitCamera::default(),
             light: Light::default(),
-            view: ViewOptions::default(),
-            panel: Panel::default(),
+            view: saved.view,
+            panel,
+            preferences,
             mods: ModifiersState::empty(),
             cursor: (0.0, 0.0),
             drag: None,
@@ -215,7 +245,7 @@ impl Gfx {
             viewport: [0.0, 0.0, size.width as f32, size.height as f32],
             last: Instant::now(),
             acc: 0.0,
-            fps: 60.0,
+            fps: FpsCounter::new(Instant::now()),
         }
     }
 
@@ -270,9 +300,10 @@ impl Gfx {
 
     fn frame(&mut self) {
         let now = Instant::now();
+        crate::recording::event("frame_begin", serde_json::json!({"sincePreviousMs":(now-self.last).as_secs_f64()*1000.0}));
         let dt = (now - self.last).as_secs_f64().min(0.1);
         self.last = now;
-        self.fps += (1.0 / dt.max(1e-3) - self.fps) * 0.05;
+        self.fps.update(now);
 
         // commands from the control server, the jog, then the simulation at a fixed 60 Hz
         if let Some((_, c)) = &mut self.control {
@@ -303,8 +334,9 @@ impl Gfx {
         // the panel
         let raw = self.egui_state.take_egui_input(&self.window);
         let port = self.control.as_ref().map(|c| c.0);
-        let (engine, view, paused, panel, fps) = (&mut self.engine, &mut self.view, &mut self.paused, &mut self.panel, self.fps);
+        let (engine, view, paused, panel, fps) = (&mut self.engine, &mut self.view, &mut self.paused, &mut self.panel, self.fps.value);
         let out = self.egui_ctx.run(raw, |ctx| panel.show(ctx, engine.as_mut(), view, paused, fps, port));
+        self.preferences.save(&self.view, &self.panel.sections);
         self.egui_state.handle_platform_output(&self.window, out.platform_output);
         let free = self.egui_ctx.available_rect();
         let ppp = out.pixels_per_point;
@@ -349,5 +381,48 @@ impl Gfx {
         }
         self.queue.submit([enc.finish()]);
         frame.present();
+        self.fps.frames += 1;
+        if crate::recording::active() {
+            crate::recording::event("frame_end", serde_json::json!({
+                "durationMs":now.elapsed().as_secs_f64()*1000.0,
+                "paused":self.paused,
+                "state":crate::protocol::twin_state(self.engine.as_ref(), crate::protocol::Frame::Yup),
+                "params":crate::protocol::params_json(self.engine.params()),
+                "camera":format!("{:?}",self.camera),
+                "view":format!("{:?}",self.view),
+                "heldKeys":self.panel.held_keys
+            }));
+        }
+    }
+}
+
+#[cfg(test)]
+mod fps_tests {
+    use super::FpsCounter;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn uneven_intervals_do_not_inflate_fps() {
+        let start = Instant::now();
+        let mut counter = FpsCounter::new(start);
+        // 30 pairs of 1 ms and 32.333 ms intervals: 60 frames in one second.
+        for i in 0..30 {
+            counter.frames += 1;
+            counter.update(start + Duration::from_secs_f64(i as f64 / 30.0 + 0.001));
+            counter.frames += 1;
+            counter.update(start + Duration::from_secs_f64((i + 1) as f64 / 30.0));
+        }
+        assert!((counter.value - 60.0).abs() < 0.01, "{}", counter.value);
+    }
+
+    #[test]
+    fn stalls_use_full_wall_time_and_failed_frames_are_not_counted() {
+        let start = Instant::now();
+        let mut counter = FpsCounter::new(start);
+        counter.frames = 1;
+        counter.update(start + Duration::from_secs(2));
+        assert_eq!(counter.value, 0.5);
+        counter.update(start + Duration::from_secs(3));
+        assert_eq!(counter.value, 0.0);
     }
 }

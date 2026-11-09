@@ -345,3 +345,27 @@ tools/                 WebSocket example controller, SO-101 asset conversion
 - Solid ice cream doesn't slowly sag once frozen.
 - `icecream shot` and the rendering test need a GPU adapter (no software fallback is set up); without one
   the test skips.
+
+## Operation recording
+
+Use **Record operations** / **Stop recording operations** in the side panel to save a diagnostic
+JSONL journal (no video). The full path appears below the button; **Copy recording path** copies it, including after recording stops. Files are created under
+`recordings/` in the working directory (`rust/recordings/` when launched with `just app`).
+The journal includes an initial state and parameters, protocol command attempts (including WebSocket
+commands), window input, and per-frame state, parameters, camera, view settings and timing.
+A `frame_begin` without a corresponding `frame_end` helps locate an interrupted frame.
+
+Each line is written immediately without application buffering, so completed writes remain available
+if the application crashes; stopping normally also syncs the file. After a crash, ignore a possibly
+incomplete final JSON line. This protects against process crashes, not power loss or disk failure.
+Recording must be started before the incident; it does not recover earlier actions. It is a diagnostic
+journal, not a full simulation checkpoint or an automatic deterministic replay. It may contain input
+text and can grow substantially during long sessions. Recording errors are displayed in the panel.
+
+## UI preferences
+
+Section expansion (Fluid, Ice cream, Spoon controller, Robot arm, View) and all settings inside View
+are saved automatically to `$XDG_CONFIG_HOME/ice-cream-sim/ui.json`, or
+`~/.config/ice-cream-sim/ui.json` when XDG_CONFIG_HOME is unset. Changes are written through a temporary
+file and renamed into place. Invalid files fall back to defaults. Simulation parameters, arm settings,
+poses, camera position, pause state and jog settings are not restored between runs.

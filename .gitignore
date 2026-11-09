@@ -2,3 +2,5 @@ rust/target
 shots
 *.png
 .cache
+
+recordings/

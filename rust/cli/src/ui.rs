@@ -9,7 +9,7 @@ use icecream_core::math::{Quat, Vec3};
 use icecream_core::params::FillShape;
 use icecream_view::{ParticleMode, Shading, ViewOptions};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashSet, BTreeMap};
 
 /// Jog axes: (label, key, linear?, axis, sign)
 pub const JOG: [(&str, char, bool, usize, f64); 12] = [
@@ -47,6 +47,7 @@ fn slerp(a: Quat, b: Quat, t: f64) -> Quat {
 }
 
 pub struct Panel {
+    pub sections: BTreeMap<String, bool>,
     pub tool_frame: bool,
     /// jog axes held (keys or buttons)
     pub held_keys: HashSet<usize>,
@@ -57,7 +58,7 @@ pub struct Panel {
 
 impl Default for Panel {
     fn default() -> Self {
-        Panel { tool_frame: false, held_keys: HashSet::new(), held_buttons: HashSet::new(), pose: [0.0, 170.0, 20.0, 0.0, 0.0, 0.0], toast: None }
+        Panel { sections: BTreeMap::new(), tool_frame: false, held_keys: HashSet::new(), held_buttons: HashSet::new(), pose: [0.0, 170.0, 20.0, 0.0, 0.0, 0.0], toast: None }
     }
 }
 
@@ -130,6 +131,28 @@ impl Panel {
         egui::SidePanel::left("panel").resizable(true).default_width(330.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("🍨 Ice Cream Twin");
+                let recording = crate::recording::active();
+                if ui.button(if recording { "Stop recording operations" } else { "Record operations" }).clicked() {
+                    if recording {
+                        crate::recording::stop();
+                    } else {
+                        crate::recording::start(json!({
+                            "state":crate::protocol::twin_state(t, Frame::Yup),
+                            "params":crate::protocol::params_json(t.params()),
+                            "paused":*paused,
+                            "note":"Diagnostic journal; not a complete simulation checkpoint"
+                        }));
+                    }
+                }
+                let status = crate::recording::status();
+                if !status.is_empty() { ui.small(status); }
+                if let Some(path) = crate::recording::path() {
+                    if ui.button("Copy recording path").clicked() {
+                        ctx.copy_text(path.display().to_string());
+                        self.say("Recording path copied".into());
+                    }
+                }
+
                 ui.label(RichText::new(format!(
                     "simulation: {}{}",
                     t.kind(),
@@ -162,9 +185,9 @@ impl Panel {
                 ui.separator();
                 status_ui(ui, t, fps);
                 ui.separator();
-                params_ui(ui, t);
-                arm_ui(ui, t);
-                view_ui(ui, view);
+                params_ui(ui, t, &mut self.sections);
+                arm_ui(ui, t, &mut self.sections);
+                view_ui(ui, view, &mut self.sections);
                 ui.separator();
                 ui.label(RichText::new(
                     "Mouse: left-drag orbit · right-drag or Shift+drag pan · wheel zoom · Ctrl+drag moves the target \
@@ -290,10 +313,10 @@ fn status_ui(ui: &mut egui::Ui, t: &mut dyn Engine, fps: f64) {
     });
 }
 
-fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
+fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine, sections: &mut BTreeMap<String, bool>) {
     let mut p = t.params().clone();
     let before = format!("{p:?}");
-    egui::CollapsingHeader::new("Fluid (loose ice cream)").show(ui, |ui| {
+    section(ui, sections, "Fluid (loose ice cream)", false, |ui| {
         let f = &mut p.fluid;
         ui.add(egui::Slider::new(&mut f.particle_radius, 0.0008..=0.0025).text("particle radius (m)"));
         ui.add(egui::Slider::new(&mut f.viscosity, 0.0..=1.0).text("viscosity (XSPH)"));
@@ -315,7 +338,7 @@ fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
         ui.checkbox(&mut f.stamp_on_contact, "freeze on first contact");
     });
     let mut refill = false;
-    egui::CollapsingHeader::new("Ice cream").show(ui, |ui| {
+    section(ui, sections, "Ice cream", false, |ui| {
         let i = &mut p.ice;
         ui.add(egui::Slider::new(&mut i.hardness, 0.0..=120.0).text("hardness (kPa)"));
         ui.checkbox(&mut i.accretion, "scoop curls (accretion)");
@@ -335,7 +358,7 @@ fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
         });
         refill = ui.button("Refill bowls").clicked();
     });
-    egui::CollapsingHeader::new("Spoon controller").show(ui, |ui| {
+    section(ui, sections, "Spoon controller", false, |ui| {
         let s = &mut p.spoon;
         ui.add(egui::Slider::new(&mut s.max_lin_speed, 0.01..=0.5).text("max speed (m/s)"));
         ui.add(egui::Slider::new(&mut s.max_ang_speed, 10.0..=360.0).text("max ang speed (°/s)"));
@@ -349,8 +372,8 @@ fn params_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
     }
 }
 
-fn arm_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
-    egui::CollapsingHeader::new("Robot arm (SO-101)").default_open(true).show(ui, |ui| {
+fn arm_ui(ui: &mut egui::Ui, t: &mut dyn Engine, sections: &mut BTreeMap<String, bool>) {
+    section(ui, sections, "Robot arm (SO-101)", true, |ui| {
         let (mut on, mut limit) = (t.arm().enabled, t.arm().constrain_target);
         if ui.checkbox(&mut on, "arm holds the spoon").changed() {
             cmd(t, json!({ "type": "arm", "enabled": on }));
@@ -373,8 +396,8 @@ fn arm_ui(ui: &mut egui::Ui, t: &mut dyn Engine) {
     });
 }
 
-fn view_ui(ui: &mut egui::Ui, v: &mut ViewOptions) {
-    egui::CollapsingHeader::new("View").show(ui, |ui| {
+fn view_ui(ui: &mut egui::Ui, v: &mut ViewOptions, sections: &mut BTreeMap<String, bool>) {
+    section(ui, sections, "View", false, |ui| {
         egui::ComboBox::from_label("loose particles").selected_text(format!("{:?}", v.particles)).show_ui(ui, |ui| {
             for (m, n) in [(ParticleMode::Surface, "surface"), (ParticleMode::Balls, "balls"), (ParticleMode::Both, "both"), (ParticleMode::Hidden, "hidden")] {
                 ui.selectable_value(&mut v.particles, m, n);
@@ -407,4 +430,37 @@ fn view_ui(ui: &mut egui::Ui, v: &mut ViewOptions) {
         ui.checkbox(&mut v.tint_fluid, "tint particle surface");
         ui.checkbox(&mut v.grid_boxes, "grid bounds");
     });
+}
+
+/// Persist only the header's open state, not egui's other widget memory.
+fn section(ui: &mut egui::Ui, sections: &mut BTreeMap<String, bool>, label: &str, default: bool, body: impl FnOnce(&mut egui::Ui)) {
+    let open = sections.get(label).copied().unwrap_or(default);
+    let response = egui::CollapsingHeader::new(label).default_open(open).show(ui, body);
+    if let Some(state) = egui::collapsing_header::CollapsingState::load(ui.ctx(), response.header_response.id) {
+        sections.insert(label.to_owned(), state.is_open());
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_ui_restores_sections_independently_of_default_open() {
+        let ctx = egui::Context::default();
+        let mut sections = BTreeMap::from([("View".into(), true), ("Robot arm (SO-101)".into(), false)]);
+        let (mut view_body, mut arm_body) = (false, false);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                section(ui, &mut sections, "View", false, |_| view_body = true);
+                section(ui, &mut sections, "Robot arm (SO-101)", true, |_| arm_body = true);
+                section(ui, &mut sections, "Ice cream", false, |_| {});
+            });
+        });
+        assert!(view_body);
+        assert!(!arm_body);
+        assert_eq!(sections["View"], true);
+        assert_eq!(sections["Robot arm (SO-101)"], false);
+        assert_eq!(sections["Ice cream"], false);
+    }
 }

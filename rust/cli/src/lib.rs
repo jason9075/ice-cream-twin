@@ -8,3 +8,7 @@ pub mod protocol;
 pub mod scene;
 pub mod shot;
 pub mod ui;
+
+pub mod recording;
+
+mod preferences;
