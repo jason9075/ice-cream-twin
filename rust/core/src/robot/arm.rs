@@ -446,6 +446,15 @@ impl Arm {
             return;
         }
 
+        // A collision can leave the old command permanently beyond the lead limit.
+        // Fresh input must be able to retreat: rebase its path on the joints solved
+        // from the actual spoon pose, rather than waiting for the unreachable old command.
+        if changed {
+            let old = self.spoon_pose(&self.q_cmd);
+            if old.pos.distance_to(sp.pos) > LEAD_LIN || old.quat.angle_to(sp.quat) > lead_ang() {
+                self.q_cmd = self.q;
+            }
+        }
         let cmd = self.spoon_pose(&self.q_cmd);
         let lagging = cmd.pos.distance_to(sp.pos) > LEAD_LIN || cmd.quat.angle_to(sp.quat) > lead_ang();
         if !lagging {

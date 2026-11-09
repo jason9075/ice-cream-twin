@@ -51,7 +51,7 @@ Ice cream exists in two forms that convert into each other:
 
 | Form | Stored as | When |
 |---|---|---|
-| Solid | one SDF volume per bowl (2.5 mm voxels, 60×60×60), one for the table around the bowls (72 × 5 × 40 cm, 288×20×160), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest, in a bowl or on the table |
+| Solid | one SDF volume per bowl (2.5 mm voxels, 60×96×60), one for the table around the bowls (72 × 5 × 40 cm, 288×20×160), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest, in a bowl or on the table |
 | Loose | PBF particles (Position Based Fluids + cohesion + XSPH viscosity + static friction); a released scoop is one shape-matched **lump** | crumbs pushed off by the spoon, a scoop sliding off a tilted spoon |
 
 - **Scooping**: the spoon's metal cuts the bowl SDF. Ice inside the cup is **copied** into the spoon's SDF,
@@ -62,7 +62,8 @@ Ice cream exists in two forms that convert into each other:
   Only ice pushed aside near the surface piles up (a ridge never builds on itself); what the spoon presses
   down deep is packed away through the ledger (real ice cream is half air and compresses). The rest
   (`ice.plow` = 0.9 plowed, 10 % by default) flies off as crumbs.
-- **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
+- **Freezing**: bowl grids extend to 23.4 cm above the table so scoops dropped onto an existing pile
+  can freeze as solid ice instead of becoming permanent static crumbs at the old 14.4 cm ceiling. A particle that stays still relative to what it rests on for a few frames, or sinks halfway
   into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`). That
   works anywhere there is a grid: in a bowl, or **on the table** (Claybook's whole world is one SDF; here
   the table around the bowls has its own grid), so dropped ice cream becomes solid ice on the table that
@@ -282,7 +283,7 @@ just bench    # CPU: mass 2075.3 -> 2075.3 g; arm-driven scoop ~2 ms/frame; the 
 fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit port. The JavaScript is gone;
 the fixtures stay as a regression net: any change to the numerics shows up there. When a change is meant to
 alter the numbers, `UPDATE_FIXTURES=1` rewrites them from the Rust core (done for: smoothing keeping out of
-the spoon; cuts kept crisp, crumbs blended at the stamp). (To match it the core
+the spoon; cuts kept crisp, crumbs blended at the stamp; taller bowl grids to retain stacked scoops). (To match it the core
 keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
 `v8math.rs`, and the same RNG.) `rust/cli/tests/control.rs` starts a real headless server and checks the
 hello, a scoop driven by `step` commands, `eat`, and a ROS-frame state stream. `rust/cli/tests/render.rs`

@@ -126,3 +126,26 @@ fn reset_puts_the_spoon_back_in_the_gripper() {
     t.step_frames(5); // arm off: plain spoon controller
     assert!(!t.arm.enabled);
 }
+
+#[test]
+fn a_new_retreat_command_can_escape_a_collision_stalled_lead() {
+    // Captured at the end of operations-1794190996953988963-93820.jsonl.
+    let mut t = Twin::default();
+    t.arm.q_cmd = [0.5412409842667937, -0.6284326966454609, 0.876116611117863, 0.1746595366686956, 2.7037534826112113];
+    t.sim.spoon.pos = Vec3::new(-0.18068051065410654, 0.09335740840169728, 0.04638858907990755);
+    t.sim.spoon.quat = Quat { x:0.8192583962876233, y:0.37571792980440033, z:-0.42890837386132913, w:0.06073980710668707 };
+    t.arm.follow(&t.sim.spoon);
+    let before = t.arm.q_cmd;
+    let retreat = t.sim.spoon.pos.add(Vec3::new(0.0, 0.004, -0.004));
+    t.sim.spoon.set_target(Some(retreat), None);
+    t.arm.constrain(&mut t.sim.spoon, 1.0/60.0);
+    assert_ne!(t.arm.q_cmd, before, "fresh retreat input was ignored while command was stalled");
+    let start = t.sim.spoon.pos;
+    for _ in 0..30 {
+        t.arm.constrain(&mut t.sim.spoon, 1.0 / 60.0);
+        t.sim.spoon.update(1.0 / 60.0, 1.0, None);
+        t.arm.follow(&t.sim.spoon);
+        assert!(t.sim.spoon.penetration(t.sim.spoon.pos, t.sim.spoon.quat) <= PEN_TOL);
+    }
+    assert!(t.sim.spoon.pos.distance_to(start) > 0.001, "spoon did not retreat after fresh input");
+}

@@ -147,3 +147,31 @@ fn a_scoop_dropped_on_the_table_freezes_there_and_can_be_scooped_again() {
     assert!(again > 1.0, "scooped {again:.2} g off the table");
     assert!((sim.total_grams() - before).abs() < 0.1, "mass {before:.2} -> {:.2} g", sim.total_grams());
 }
+
+#[test]
+fn a_scoop_landing_on_a_high_pile_merges_instead_of_becoming_static_balls() {
+    let mut sim = Sim::default();
+    sim.spoon.pos = Vec3::new(0.27, 0.25, 0.1);
+    sim.set_target(Some(sim.spoon.pos), None);
+    sim.sync_spoon();
+    // A previously deposited scoop, close to the old 144 mm grid ceiling.
+    sim.grids[1].stamp_sphere(0.0, 0.127, 0.0, 0.014, 0.0025, None);
+    let fp = sim.params.fluid.clone();
+    sim.fluid.configure(fp.particle_radius, fp.kernel_scale);
+    let lump = sim.fluid.new_lump();
+    for z in -4i32..=4 {
+        for y in -4i32..=4 {
+            for x in -4i32..=4 {
+                if x*x + y*y + z*z > 16 { continue; }
+                let i = sim.fluid.spawn(x as f64 * 0.0025, 0.16 + y as f64 * 0.0025, z as f64 * 0.0025, 0.0, 0.0, 0.0, [255;4]).unwrap();
+                sim.fluid.set_lump(i, lump);
+            }
+        }
+    }
+    let before = sim.total_grams();
+    sim.step_frames(90);
+    assert_eq!(sim.n_spilled, 0, "landed scoop became permanent static balls");
+    assert_eq!(sim.fluid.n, 0, "landed scoop did not freeze");
+    assert!(sim.grids[1].sample(0.0, 0.15, 0.0) < 0.0, "upper scoop was not stored in bowl SDF");
+    assert!((sim.total_grams()-before).abs()<0.1, "mass changed");
+}

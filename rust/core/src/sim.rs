@@ -15,7 +15,9 @@ use crate::spoon::{point_velocity, SpoonController, Substep};
 use std::f64::consts::PI;
 
 const WORLD_CELL: f64 = 0.0025;
-const WORLD_DIMS: [usize; 3] = [60, 60, 60];
+// Leave headroom for deposited scoops. The old 144 mm ceiling turned the
+// upper half of a landed lump into permanent static crumbs instead of solid ice.
+const WORLD_DIMS: [usize; 3] = [60, 96, 60];
 const CONTENT_ORIGIN: [f64; 3] = [-0.032, -0.014, -0.022];
 const CONTENT_CELL: f64 = 0.0016;
 const CONTENT_DIMS: [usize; 3] = [40, 25, 28];

@@ -39,30 +39,33 @@ fn drive(g: &mut GpuSim, p: Vec3, q: Quat, frames: usize, mut every: impl FnMut(
 #[test]
 fn prefix_scans_and_volumes() {
     let Some(mut g) = gpu() else { return };
-    let n = 100_003u32;
-    let u: Vec<u32> = (0..n).map(|i| (i.wrapping_mul(2654435761)) % 7).collect();
-    let f: Vec<f32> = (0..n).map(|i| ((i * 40503) % 1000) as f32 / 997.0).collect();
-    let (scanu, list, dvd, pd) = (g.l.x.get("SCANU"), g.l.x.get("LIST"), g.l.w.get("DVD"), g.l.w.get("PD"));
-    g.debug_write('X', scanu, bytemuck::cast_slice(&u));
-    g.debug_write('W', dvd, bytemuck::cast_slice(&f));
-    g.debug_run(|g, fr| {
-        g.debug_scan(fr, true, scanu, list, n);
-        g.debug_scan(fr, false, dvd, pd, n);
-        for k in 0..3 {
-            g.debug_grid_occ(fr, k, st::VOLUME + k as u32);
+    // Cover the largest grid: its block sums exceed the old 512-block limit.
+    let largest = g.l.grids[icecream_gpu::layout::TABLE_G as usize].count;
+    for n in [100_003u32, largest - 17, largest] {
+        let u: Vec<u32> = (0..n).map(|i| (i.wrapping_mul(2654435761)) % 7).collect();
+        let f: Vec<f32> = (0..n).map(|i| ((i * 40503) % 1000) as f32 / 997.0).collect();
+        let (scanu, list, dvd, pd) = (g.l.x.get("SCANU"), g.l.x.get("LIST"), g.l.w.get("DVD"), g.l.w.get("PD"));
+        g.debug_write('X', scanu, bytemuck::cast_slice(&u));
+        g.debug_write('W', dvd, bytemuck::cast_slice(&f));
+        g.debug_run(|g, fr| {
+            g.debug_scan(fr, true, scanu, list, n);
+            g.debug_scan(fr, false, dvd, pd, n);
+            for k in 0..3 {
+                g.debug_grid_occ(fr, k, st::VOLUME + k as u32);
+            }
+        });
+        let gu = g.debug_read('X', list, n);
+        let gf = g.debug_read_f32(pd, n);
+        let (mut au, mut af, mut bad, mut rel) = (0u32, 0f64, 0, 0f64);
+        for i in 0..n as usize {
+            bad += usize::from(gu[i] != au);
+            rel = rel.max((gf[i] as f64 - af).abs() / af.max(1.0));
+            au += u[i];
+            af += f[i] as f64;
         }
-    });
-    let gu = g.debug_read('X', list, n);
-    let gf = g.debug_read_f32(pd, n);
-    let (mut au, mut af, mut bad, mut rel) = (0u32, 0f64, 0, 0f64);
-    for i in 0..n as usize {
-        bad += usize::from(gu[i] != au);
-        rel = rel.max((gf[i] as f64 - af).abs() / af.max(1.0));
-        au += u[i];
-        af += f[i] as f64;
+        assert_eq!(bad, 0, "u32 scan");
+        assert!(rel < 1e-5, "f32 scan rel error {rel:e}");
     }
-    assert_eq!(bad, 0, "u32 scan");
-    assert!(rel < 1e-5, "f32 scan rel error {rel:e}");
     let stv = g.debug_read_f32(g.l.w.get("ST"), 64);
     for k in 0..3 {
         let cpu = g.cpu.grids[k].volume();
@@ -521,4 +524,46 @@ fn a_scoop_dropped_on_the_table_freezes_there_like_the_cpu() {
     eprintln!("scraped back up: GPU {ga:.1} g, CPU {ca:.1} g; mass drift {:.3} / {:.3} g", g.total_grams() - g0, c.total_grams() - c0);
     assert!(ga > 0.5 && ca > 0.5);
     assert!((g.total_grams() - g0).abs() < 0.2);
+}
+
+#[test]
+fn a_scoop_landing_on_a_high_pile_freezes_without_static_crumbs() {
+    let Some(mut g) = gpu() else { return };
+    g.stream = false;
+    g.cpu.spoon.pos = Vec3::new(0.27, 0.25, 0.1);
+    g.cpu.spoon.set_target(Some(g.cpu.spoon.pos), None);
+    g.cpu.grids[1].stamp_sphere(0.0, 0.127, 0.0, 0.014, 0.0025, None);
+    let grid = &g.cpu.grids[1];
+    g.debug_write('W', g.l.w.get("D") + g.l.grids[1].off, bytemuck::cast_slice(&grid.data));
+    let mut pos = Vec::<f32>::new();
+    for z in -4i32..=4 {
+        for y in -4i32..=4 {
+            for x in -4i32..=4 {
+                if x*x + y*y + z*z <= 16 {
+                    pos.extend_from_slice(&[x as f32 * 0.0025, 0.16 + y as f32 * 0.0025, z as f32 * 0.0025]);
+                }
+            }
+        }
+    }
+    let n = pos.len() / 3;
+    for name in ["POS", "FPOS", "SHAPE"] {
+        g.debug_write('W', g.l.w.get(name), bytemuck::cast_slice(&pos));
+    }
+    g.debug_write('W', g.l.w.get("SLOW"), bytemuck::cast_slice(&vec![1f32;n]));
+    for name in ["LUMP", "ALIVE"] {
+        g.debug_write('X', g.l.x.get(name), bytemuck::cast_slice(&vec![1u32;n]));
+    }
+    g.debug_write('X', g.l.x.get("RGBA"), bytemuck::cast_slice(&vec![0xffffffffu32;n]));
+    // Match releaseEnd's initial rotation for this seeded lump.
+    g.debug_write('W', g.l.w.get("LUMPS") + 32 + 16, bytemuck::cast_slice(&[0f32, 0.0, 0.0, 1.0]));
+    g.debug_write('A', g.l.a.get("CNT") + cnt::N, bytemuck::cast_slice(&[n as u32]));
+    g.step(1.0/60.0);
+    let before = g.total_grams();
+    for _ in 0..90 { g.step(1.0/60.0); }
+    assert_eq!(g.stats.spilled, 0, "landed scoop became permanent static balls");
+    assert_eq!(g.stats.n, 0, "landed scoop did not freeze");
+    let data = g.debug_read_f32(g.l.w.get("D") + g.l.grids[1].off, g.l.grids[1].count);
+    g.cpu.grids[1].data = data;
+    assert!(g.cpu.grids[1].sample(0.0, 0.15, 0.0) < 0.0, "upper scoop missing from bowl SDF");
+    assert!((g.total_grams()-before).abs()<0.1, "mass changed");
 }

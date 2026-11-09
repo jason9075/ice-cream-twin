@@ -3,7 +3,7 @@
 //! any change to the numerics shows up here. Behaviour changes on purpose: update the expectations, don't
 //! loosen the comparison. `UPDATE_FIXTURES=1 cargo test -p icecream-core --test parity` rewrites scoop,
 //! plunge and arm from the Rust core (then run it again without). Rewritten so far: smoothing keeps out of
-//! the spoon (scoop, plunge, arm); cuts kept crisp and crumbs stamped with a wider blend; plowing (all three).
+//! the spoon (scoop, plunge, arm); cuts kept crisp and crumbs stamped with a wider blend; plowing (all three); taller bowl grids for stacked scoops (all three, traversal and ledger order change).
 
 use icecream_core::math::{self, Quat, Vec3};
 use icecream_core::sdf::{bowls, FLAVORS};

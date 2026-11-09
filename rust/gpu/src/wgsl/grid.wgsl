@@ -4,8 +4,6 @@
 // ================================================================ scans
 // Exclusive prefix sum of n values at src into dst, in blocks of 512 (3 dispatches: block scan,
 // scan of the block sums, add). P.i0 = (src, dst, n, 0). f32 values live in W, u32 in X.
-var<workgroup> scanF: array<f32, 512>;
-var<workgroup> scanUv: array<u32, 512>;
 
 @compute @workgroup_size(256)
 fn scanBlockF(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid: vec3u) {
@@ -49,35 +47,44 @@ fn scanBlockU(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li
   if (base + 2u * t + 1u < n) { X[u32(P.i0.y) + base + 2u * t + 1u] = excl + a; }
   if (t == 255u) { W[W_SCANB + wg.x] = bitcast<f32>(redU[255]); }
 }
-// block sums: <= 512 blocks, one workgroup. P.i0.w = 1 for u32 (bitcast in SCANB).
+// Scan block sums using a contiguous chunk per thread. The table grid needs
+// more than 512 block sums; scanning only two per thread leaves stale offsets.
+// SCANB holds nb input sums followed by nb exclusive offsets.
 @compute @workgroup_size(256)
 fn scanSums(@builtin(local_invocation_id) lid: vec3u) {
   let t = lid.x;
   let nb = (u32(P.i0.z) + 511u) / 512u;
-  let isU = P.i0.w == 1;
-  if (isU) {
-    let a = select(0u, bitcast<u32>(W[W_SCANB + 2u * t]), 2u * t < nb);
-    let b = select(0u, bitcast<u32>(W[W_SCANB + 2u * t + 1u]), 2u * t + 1u < nb);
-    let r = wgScanU(t, a + b);
-    if (2u * t < nb) { W[W_SCANB + 1024u + 2u * t] = bitcast<f32>(r.x); }
-    if (2u * t + 1u < nb) { W[W_SCANB + 1024u + 2u * t + 1u] = bitcast<f32>(r.x + a); }
-    if (t == 0u) { W[W_SCANB + 1023u] = bitcast<f32>(r.y); }
+  let chunk = (nb + 255u) / 256u;
+  let first = min(t * chunk, nb);
+  let last = min(first + chunk, nb);
+  if (P.i0.w == 1) {
+    var sum = 0u;
+    for (var i = first; i < last; i++) { sum += bitcast<u32>(W[W_SCANB + i]); }
+    let scan = wgScanU(t, sum);
+    var offset = scan.x;
+    for (var i = first; i < last; i++) {
+      let value = bitcast<u32>(W[W_SCANB + i]);
+      W[W_SCANB + nb + i] = bitcast<f32>(offset);
+      offset += value;
+    }
   } else {
-    let a = select(0.0, W[W_SCANB + 2u * t], 2u * t < nb);
-    let b = select(0.0, W[W_SCANB + 2u * t + 1u], 2u * t + 1u < nb);
-    redF[t] = a + b;
+    var sum = 0.0;
+    for (var i = first; i < last; i++) { sum += W[W_SCANB + i]; }
+    redF[t] = sum;
     workgroupBarrier();
-    for (var s = 1u; s < 256u; s <<= 1u) {
-      var v = 0.0;
-      if (t >= s) { v = redF[t - s]; }
+    for (var stride = 1u; stride < 256u; stride <<= 1u) {
+      var value = 0.0;
+      if (t >= stride) { value = redF[t - stride]; }
       workgroupBarrier();
-      redF[t] += v;
+      redF[t] += value;
       workgroupBarrier();
     }
-    let excl = redF[t] - (a + b);
-    if (2u * t < nb) { W[W_SCANB + 1024u + 2u * t] = excl; }
-    if (2u * t + 1u < nb) { W[W_SCANB + 1024u + 2u * t + 1u] = excl + a; }
-    if (t == 0u) { W[W_SCANB + 1023u] = redF[255]; }
+    var offset = redF[t] - sum;
+    for (var i = first; i < last; i++) {
+      let value = W[W_SCANB + i];
+      W[W_SCANB + nb + i] = offset;
+      offset += value;
+    }
   }
 }
 @compute @workgroup_size(256)
@@ -87,9 +94,9 @@ fn scanAdd(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid: 
     let i = wg.x * 512u + 2u * lid.x + e;
     if (i >= n) { continue; }
     if (P.i0.w == 1) {
-      X[u32(P.i0.y) + i] += bitcast<u32>(W[W_SCANB + 1024u + wg.x]);
+      X[u32(P.i0.y) + i] += bitcast<u32>(W[W_SCANB + (n + 511u) / 512u + wg.x]);
     } else {
-      W[u32(P.i0.y) + i] += W[W_SCANB + 1024u + wg.x];
+      W[u32(P.i0.y) + i] += W[W_SCANB + (n + 511u) / 512u + wg.x];
     }
   }
 }

@@ -170,7 +170,7 @@ impl Layout {
             ("LAM", CAP), ("FPOS", 3 * CAP), ("SLOW", CAP),
             ("QPOS", 3 * CAP), ("QVEL", 3 * CAP), ("QCN", 3 * CAP), ("QSV", 3 * CAP), ("QSLOW", CAP),
             ("SHAPE", 3 * CAP), ("QSHAPE", 3 * CAP), ("LUMPS", 32 * (MAX_LUMPS as u32 + 1)),
-            ("PART", 8192), ("SCANB", 2048), ("SPOS", 3 * MAX_SPILLED), ("DEBTF", 4 * MAX_DEBTS), ("ST", 256),
+            ("PART", 8192), ("SCANB", 2 * maxr.max(CAP).div_ceil(512)), ("SPOS", 3 * MAX_SPILLED), ("DEBTF", 4 * MAX_DEBTS), ("ST", 256),
         ]);
         let x = Sections::new(&[
             ("COL", n), ("FLAG", n), ("LIST", n), ("CSRC", nc), ("CFLAG", nc),
