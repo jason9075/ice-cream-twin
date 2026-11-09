@@ -402,6 +402,7 @@ fn view_ui(ui: &mut egui::Ui, v: &mut ViewOptions) {
                 ui.selectable_value(&mut v.shading, m, n);
             }
         });
+        ui.checkbox(&mut v.ice_matte, "matte ice cream (off: the older glossy look)");
         ui.checkbox(&mut v.tint_fluid, "tint particle surface");
         ui.checkbox(&mut v.grid_boxes, "grid bounds");
     });

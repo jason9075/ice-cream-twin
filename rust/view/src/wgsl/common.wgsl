@@ -4,7 +4,7 @@ struct Frame {
   lightVP  : mat4x4f,
   camPos   : vec4f,   // w = 1: orthographic pass (shadow map)
   lightDir : vec4f,   // xyz: unit vector toward the sun
-  rayDir   : vec4f,   // xyz: ray direction of the orthographic pass
+  rayDir   : vec4f,   // xyz: ray direction of the orthographic pass; w = 1: matte ice cream
 };
 @group(0) @binding(0) var<uniform> F : Frame;
 @group(0) @binding(1) var shadowMap : texture_depth_2d;

@@ -91,6 +91,8 @@ pub struct ViewOptions {
     pub shadows: bool,
     pub shading: Shading,
     pub grid_boxes: bool,
+    /// the ice cream's material: matte frozen foam (true) or the older glossy look
+    pub ice_matte: bool,
 }
 
 impl Default for ViewOptions {
@@ -113,6 +115,7 @@ impl Default for ViewOptions {
             shadows: true,
             shading: Shading::Shaded,
             grid_boxes: false,
+            ice_matte: true,
         }
     }
 }
@@ -672,14 +675,14 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_frame(&self, buf: &wgpu::Buffer, view_proj: Mat4, light_vp: Mat4, cam: Vec3, ortho: bool, light: &Light, debug: f32) {
+    fn write_frame(&self, buf: &wgpu::Buffer, view_proj: Mat4, light_vp: Mat4, cam: Vec3, ortho: bool, light: &Light, debug: f32, matte: bool) {
         let mut f = [0f32; 44];
         f[..16].copy_from_slice(&view_proj.to_cols_array());
         f[16..32].copy_from_slice(&light_vp.to_cols_array());
         f[32..36].copy_from_slice(&[cam.x, cam.y, cam.z, if ortho { 1.0 } else { 0.0 }]);
         f[36..40].copy_from_slice(&[light.dir.x, light.dir.y, light.dir.z, debug]);
         let rd = -light.dir;
-        f[40..44].copy_from_slice(&[rd.x, rd.y, rd.z, 0.0]);
+        f[40..44].copy_from_slice(&[rd.x, rd.y, rd.z, if matte { 1.0 } else { 0.0 }]);
         self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&f));
     }
 
@@ -695,8 +698,8 @@ impl Renderer {
         let light_view = Mat4::look_at_rh(eye, light.center, Vec3::Y);
         let e = light.extent;
         let light_vp = Mat4::orthographic_rh(-e, e, -e * 0.7, e * 0.7, 0.2, 2.0) * light_view;
-        self.write_frame(&self.frame_buf, view_proj, light_vp, camera.eye(), false, light, opts.shading as u32 as f32);
-        self.write_frame(&self.shadow_frame_buf, light_vp, light_vp, eye, true, light, 0.0);
+        self.write_frame(&self.frame_buf, view_proj, light_vp, camera.eye(), false, light, opts.shading as u32 as f32, opts.ice_matte);
+        self.write_frame(&self.shadow_frame_buf, light_vp, light_vp, eye, true, light, 0.0, false);
 
         // the particle surface (compute), when there is one to draw
         let surface = matches!(opts.particles, ParticleMode::Surface | ParticleMode::Both) && self.frame.particles > 0;

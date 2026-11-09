@@ -91,6 +91,21 @@ fn depthOf(lp : vec3f) -> f32 {
 
 struct FOut { @location(0) color : vec4f, @builtin(frag_depth) depth : f32 };
 
+// local-space normal with sub-millimetre relief from two octaves of value noise (ice crystals, pores)
+fn microNormal(p : vec3f, n : vec3f) -> vec3f {
+  var g = vec3f(0.0);
+  for (var k = 0; k < 2; k++) {
+    let f = select(1400.0, 3800.0, k == 1);
+    let a = select(0.25, 0.14, k == 1);
+    let q = p * f;
+    let d = vec3f(noise3(q + vec3f(0.35, 0.0, 0.0)) - noise3(q - vec3f(0.35, 0.0, 0.0)),
+                  noise3(q + vec3f(0.0, 0.35, 0.0)) - noise3(q - vec3f(0.0, 0.35, 0.0)),
+                  noise3(q + vec3f(0.0, 0.0, 0.35)) - noise3(q - vec3f(0.0, 0.0, 0.35)));
+    g += d * a;
+  }
+  // keep only the part across the surface
+  return normalize(n - (g - n * dot(g, n)));
+}
 
 @fragment fn fs(i : VOut) -> FOut {
   let h = march(i.lp);
@@ -132,13 +147,33 @@ struct FOut { @location(0) color : vec4f, @builtin(frag_depth) depth : f32 };
   if (m == 2) { o.color = vec4f(pow(alb, vec3f(1.0 / 2.2)), 1.0); return o; }
   if (m == 3) { o.color = vec4f(heat(f32(h.steps) / 80.0), 1.0); return o; }
 
-  let diff = clamp((dot(nW, L) + 0.35) / 1.35, 0.0, 1.0);
-  let H = normalize(L + V);
-  let spec = pow(max(dot(nW, H), 0.0), 40.0) * 0.16 * sh * (1.0 - speck * 0.5);
-  let back = pow(clamp(dot(V, -L), 0.0, 1.0), 3.0) * 0.2;
-  let hemi = mix(GROUND, SKY, 0.5 + 0.5 * nW.y);
-  var c = alb * (hemi * ao + SUN * diff * sh * 0.8) + alb * back * 0.3 + vec3f(spec);
-  c += alb * pow(1.0 - max(dot(nW, V), 0.0), 3.0) * 0.1;
+  var c : vec3f;
+  if (F.rayDir.w > 0.5) {
+    // matte ice cream: frozen foam, not a wet surface. Micro relief (ice crystals, air pockets) perturbs
+    // the normal, light scatters a little under the surface (wrapped, slightly saturated in the shade),
+    // no sharp highlight, only a soft sheen at grazing angles.
+    let nm = microNormal(p, n);
+    let nM = normalize((U.model * vec4f(nm, 0.0)).xyz);
+    let pore = 0.86 + 0.14 * smoothstep(0.2, 0.7, noise3(p * 3200.0 + vec3f(5.0)));
+    let albM = alb * pore;
+    let ndl = dot(nM, L);
+    let wrap = clamp((ndl + 0.5) / 1.5, 0.0, 1.0);
+    let scatter = albM * albM * 1.6; // light that went under the surface comes out in the flavour's colour
+    let lit = mix(scatter, albM, clamp(ndl * 2.0, 0.0, 1.0));
+    let hemi = mix(GROUND, SKY, 0.5 + 0.5 * nM.y);
+    let H = normalize(L + V);
+    let sheen = pow(1.0 - max(dot(nM, V), 0.0), 4.0) * 0.12;
+    let soft = pow(max(dot(nM, H), 0.0), 6.0) * 0.035 * sh * (1.0 - speck);
+    c = albM * hemi * ao + lit * SUN * wrap * sh * 0.82 + albM * sheen + vec3f(soft);
+  } else {
+    let diff = clamp((dot(nW, L) + 0.35) / 1.35, 0.0, 1.0);
+    let H = normalize(L + V);
+    let spec = pow(max(dot(nW, H), 0.0), 40.0) * 0.16 * sh * (1.0 - speck * 0.5);
+    let back = pow(clamp(dot(V, -L), 0.0, 1.0), 3.0) * 0.2;
+    let hemi = mix(GROUND, SKY, 0.5 + 0.5 * nW.y);
+    c = alb * (hemi * ao + SUN * diff * sh * 0.8) + alb * back * 0.3 + vec3f(spec);
+    c += alb * pow(1.0 - max(dot(nW, V), 0.0), 3.0) * 0.1;
+  }
 
   o.color = vec4f(toScreen(c), 1.0);
   return o;

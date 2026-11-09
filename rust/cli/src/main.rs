@@ -6,7 +6,7 @@
 //!                       and keys; the control server (WebSocket, control.rs) runs alongside
 //! icecream server [--port 8765] [--paused] [--cpu]
 //!                       headless: the simulation in real time, controlled over the WebSocket only
-//! icecream shot [DIR] [--cpu] [--params JSON]
+//! icecream shot [DIR] [--cpu] [--params JSON] [--glossy]
 //!                       a scripted session rendered off screen to PNGs (default DIR: shots); --params
 //!                       patches the parameters first (as set_params), for A/B comparisons
 //! icecream serve [--gpu] JSON lines on stdin -> JSON lines on stdout (same commands; for ROS nodes,
@@ -177,7 +177,7 @@ fn main() {
             let rest = &args[2..];
             let params = rest.iter().position(|a| a == "--params").map(|k| serde_json::from_str::<Value>(rest.get(k + 1).expect("--params JSON")).expect("--params: bad JSON"));
             let dir = rest.iter().enumerate().find(|(k, a)| !a.starts_with("--") && (*k == 0 || rest[k - 1] != "--params")).map(|(_, a)| a.clone()).unwrap_or_else(|| "shots".into());
-            shot::run(std::path::Path::new(&dir), rest.iter().any(|a| a == "--cpu"), params.as_ref());
+            shot::run(std::path::Path::new(&dir), rest.iter().any(|a| a == "--cpu"), params.as_ref(), rest.iter().any(|a| a == "--glossy"));
         }
         Some("serve") => serve(args.iter().any(|a| a == "--gpu")),
         Some("bench") => bench(),

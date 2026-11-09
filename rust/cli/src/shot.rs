@@ -56,7 +56,7 @@ fn facing(pitch: f64) -> Quat {
 }
 
 /// `params`: a set_params patch applied before anything happens (A/B comparisons).
-pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>) {
+pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>, glossy: bool) {
     std::fs::create_dir_all(dir).expect("output directory");
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).expect("no GPU adapter");
@@ -74,7 +74,7 @@ pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>) {
         crate::protocol::apply_params(&mut p, patch).expect("--params");
         engine.set_params(p);
     }
-    let mut s = Shot { engine, renderer, sync: Sync::default(), camera: OrbitCamera::default(), view: ViewOptions::default(), dir: dir.to_path_buf() };
+    let mut s = Shot { engine, renderer, sync: Sync::default(), camera: OrbitCamera::default(), view: ViewOptions { ice_matte: !glossy, ..Default::default() }, dir: dir.to_path_buf() };
 
     s.steps(30);
     s.save("01-start.png");

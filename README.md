@@ -82,7 +82,10 @@ Ice cream exists in two forms that convert into each other:
   falls as a ball and lands as a mound; on a level spoon it stays in the cup. Crumbs stay fluid.
 - **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
-  shader renders into the shadow map.
+  shader renders into the shadow map. The ice cream is **matte frozen foam**: sub-millimetre relief from
+  noise perturbs the normal (ice crystals, pores), light wraps and comes back saturated in the shade (a
+  little subsurface scattering), and there is no sharp highlight, only a soft sheen at grazing angles
+  (View → Debug turns the older glossy look back on).
 
 ### On the GPU (`rust/gpu`)
 
@@ -214,8 +217,8 @@ commands a controller sends (`rust/cli/src/ui.rs`). **View** is drawing only:
   sliders (× particle radius).
 - **Show**: crumbs, ice cream in the bowls and on the spoon, bowls, spoon, SO-101, table, target ghost,
   shadows.
-- **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map), a blue tint on the particle
-  surface, and translucent boxes for each SDF grid (orange: bowls,
+- **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map), matte or the older glossy ice
+  cream, a blue tint on the particle surface, and translucent boxes for each SDF grid (orange: bowls,
   green: spoon).
 
 ## Digital-twin interface
@@ -248,7 +251,7 @@ scoops vanilla → eats → scoops mint → eats, with the handle pointed at the
 **`icecream serve`** (`just stdio`) takes the same commands as JSON lines on stdin and answers on stdout, for
 a ROS node or a script that runs the twin as a subprocess (no real-time loop: it advances on `step`).
 
-**`icecream shot [DIR] [--params JSON]`** (`just screenshots`) renders a scripted session off
+**`icecream shot [DIR] [--params JSON] [--glossy]`** (`just screenshots`) renders a scripted session off
 screen (`--params` patches the parameters first, for A/B comparisons): the SO-101 scoops
 strawberry, close-ups of the spoon and the gripper, the scoop rolled off into the bowl, and the same frame
 through the debug views; it prints a JSON summary and fails on any GPU validation error.
