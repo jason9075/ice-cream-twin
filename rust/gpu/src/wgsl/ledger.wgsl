@@ -4,10 +4,12 @@
 // fixed-point bins (3x3x3 voxels of a bowl grid, atomic adds, so the totals don't depend on thread
 // order); once a frame one workgroup turns the bins into debts (the CPU's debt list, merged the same
 // way), applies the pending "extra ice" (negative settles: cancel debts, else credit), and pays: it
-// stamps owed ice onto the lowest free ice top near where it went missing, clear of the spoon, and
+// stamps owed ice onto low free ice tops, favoring nearby positions clear of the spoon, and
 // shaves credit off the highest. Thread 0 makes the decisions; the workgroup evaluates candidate
 // columns and stamps together.
 const DEBT_STAMPS: u32 = 48u;
+// Match the CPU: 4 mm less travel offsets 1 mm more height.
+const DEBT_DISTANCE_WEIGHT: f32 = 0.25;
 const BOWL_T_HALF: f32 = 0.0015;
 const PI: f32 = 3.14159265358979;
 
@@ -152,9 +154,9 @@ var<workgroup> lgAct: u32;     // 0 done, 1 search debt, 2 skip, 3 credit carve
 var<workgroup> lgP: vec4f;     // debt x, y, z, rs
 var<workgroup> lgDir: vec4f;   // search direction x, z, rimIn, grid
 var<workgroup> lgBest: vec4f;  // chosen x, y, z, found
-var<workgroup> lgTop: array<f32, 32>;
+var<workgroup> lgTop: array<f32, 64>;
 var<workgroup> lgRGBA: u32;
-var<workgroup> lgCand: array<vec2f, 32>;
+var<workgroup> lgCand: array<vec2f, 64>;
 
 /** Top ice surface of column (x, z) in grid g, or -BIG (Sim._columnTop). */
 fn columnTop(g: u32, x: f32, z: f32) -> f32 {
@@ -288,10 +290,16 @@ fn ledgerPay(@builtin(local_invocation_id) lid: vec3u) {
     let g = u32(dd.w);
     let c = GO[g].w;
     let rs = dp.w;
-    // 16 candidate columns along the direction; the search stops at the first one outside the grid
-    if (t < 16u) {
-      let xx = dp.x + dd.x * f32(t) * c;
-      let zz = dp.z + dd.y * f32(t) * c;
+    // Match Sim.pay_debts: eight rays and eight radii spread displacement over an area,
+    // reaching the far side of the bowl instead of repaying a deep cut into a narrow tower.
+    // Quadratic radii retain dense samples near the source, with a distance cost favoring local flow.
+    if (t < 64u) {
+      let angle = f32(t / 8u) * (2.0 * PI / 8.0);
+      let dir = vec2f(dd.x * cos(angle) - dd.y * sin(angle), dd.x * sin(angle) + dd.y * cos(angle));
+      let fraction = f32(t % 8u) / 7.0;
+      let radius = 2.0 * BOWL_W * fraction * fraction;
+      let xx = dp.x + dir.x * radius;
+      let zz = dp.z + dir.y * radius;
       let inside = gcontains(g, vec3f(xx, GO[g].y + gsize(g).y * 0.5, zz), rs + c);
       var top = -BIG;
       if (inside && length(vec2f(xx - bowlCx(g), zz)) <= dd.z) {
@@ -299,16 +307,16 @@ fn ledgerPay(@builtin(local_invocation_id) lid: vec3u) {
         if (tp > -BIG && tp <= GO[g].y + gsize(g).y - 2.0 * rs - c && !underCup(xx, tp, zz, rs) &&
             clearOfSpoon(vec3f(xx, tp, zz), rs + 0.002)) { top = tp; }
       }
-      lgTop[t] = select(-2.0 * BIG, top, inside);
+      lgTop[t] = top;
       lgCand[t] = vec2f(xx, zz);
     }
     workgroupBarrier();
     if (t == 0u) {
       var best = BIG;
       var bi = 99u;
-      for (var m = 0u; m < 16u; m++) {
-        if (lgTop[m] == -2.0 * BIG) { break; }
-        if (lgTop[m] > -BIG && lgTop[m] < best) { best = lgTop[m]; bi = m; }
+      for (var m = 0u; m < 64u; m++) {
+        let score = lgTop[m] + DEBT_DISTANCE_WEIGHT * length(lgCand[m] - dp.xz);
+        if (lgTop[m] > -BIG && score < best) { best = score; bi = m; }
       }
       stamps++;
       X[X_DEBTU + n * 3u + 1u] = dTries(n) + 1u;
@@ -326,7 +334,7 @@ fn ledgerPay(@builtin(local_invocation_id) lid: vec3u) {
           }
         }
       }
-      if (bi != 99u) { lgBest = vec4f(lgCand[bi].x, best, lgCand[bi].y, 1.0); } else { lgBest = vec4f(0.0); }
+      if (bi != 99u) { lgBest = vec4f(lgCand[bi].x, lgTop[bi], lgCand[bi].y, 1.0); } else { lgBest = vec4f(0.0); }
     }
     let bst = workgroupUniformLoad(&lgBest);
     let rgba = workgroupUniformLoad(&lgRGBA);

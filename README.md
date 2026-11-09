@@ -135,13 +135,14 @@ uses the previous frame's carving.
   | volume-preserving smoothing + settling of 2,111 edited voxels, the spoon in them | max difference 5·10⁻⁶ cell |
   | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
   | 61 carve steps, then one plow pass | the plowed ice adds 53.7 cm³ to the bowl (CPU 54.0) |
-  | scoop, carry, eat (510 frames) | 16.4 g scooped (CPU 12.1 g), mass drift 0.009 g |
-  | straight down into each bowl, held, lifted | held: no gain; lifted out 13.0 / 0.8 / 7.8 g (CPU 10.4 / 2.4 / 9.5 g) |
-  | tip-out | scoop gone, ~870 particles, frozen back 4 s later, drift 0.2 g |
-  | a dragged scoop released on a level spoon | stays in the cup as one lump (28.8 → 22.1 mm tall after 20 frames) |
-  | a scoop dropped on the table | freezes into the table grid (GPU 9.9 g of 9.7, no crumbs), scraped back up 2.3 g (CPU 2.3) |
-  | three plunges into the same hole + eat | 18.1 g eaten, drift 0.01 g |
-  | the SO-101 carrying a GPU scoop | ~12 g, arm within 0.33 mm of the spoon |
+  | scoop, carry, eat (510 frames) | 6.6 g scooped (CPU 6.3 g), mass drift 0.009 g |
+  | straight down into each bowl, held, lifted | held: no gain; lifted out 7.5 / 0.7 / 4.5 g (CPU 5.4 / 0.1 / 5.6 g) |
+  | tip-out | scoop gone, ~558 particles, frozen back 4 s later, drift 0.001 g |
+  | the same dragged scoop geometry released on a level spoon | stays in the cup as one lump (16.6 → 13.7 mm tall after 20 frames) |
+  | a scoop dropped on the table | freezes into the table grid (GPU 5.8 g, no crumbs), scraped back up 1.2 g (CPU 1.2) |
+  | three plunges into the same hole + eat | 18.0 g eaten, drift 0.01 g |
+  | the SO-101 carrying a GPU scoop (70 mm deep pass) | ~12 g, arm within 0.31 mm of the spoon |
+  | near-edge deep dig, then lift | peak rise 10 mm (previously 80 mm); mass drift 0.009 g |
   | two identical runs | bit-identical |
 
 - **Speed** (RTX 3080 Ti, Vulkan): a scoop takes ~2 ms/frame with the arm (CPU ~3–4 ms), 15,000 loose
@@ -157,8 +158,12 @@ Every transfer is measured in voxel occupancy, and anything that can't be placed
 - a particle freezing into ice that is already there;
 - whatever a smoothing pass can't restore.
 
-Each frame, owed ice is stamped onto the lowest free ice surface near where it went missing, clear of the
-spoon, so displaced ice heaps up around the spoon. Stamps that add too much become credit and are shaved off
+Each frame, owed ice is stamped onto a low clear surface among 64 candidates spread around the
+displacement, reaching across the bowl. Searching only a short ray concentrated deep cuts into thin towers;
+the area search lets displaced ice spread into lower parts of the bowl without a height cap. A distance
+cost favors nearby surfaces, and candidate spacing is denser close to the displacement. This is a
+volume redistribution approximation, rather than a pressure or plastic deformation solver.
+Stamps that add too much become credit and are shaved off
 the highest clear peak. Plunging straight to the bottom of a bowl three times conserves the total
 (bowls + spoon + particles + eaten + spilled) to within 0.1 g of 2075 g (`rust/core/tests/sim.rs`). Everything
 counted as "spilled" is a visible crumb on the table.
@@ -283,7 +288,8 @@ just bench    # CPU: mass 2075.3 -> 2075.3 g; arm-driven scoop ~2 ms/frame; the 
 fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit port. The JavaScript is gone;
 the fixtures stay as a regression net: any change to the numerics shows up there. When a change is meant to
 alter the numbers, `UPDATE_FIXTURES=1` rewrites them from the Rust core (done for: smoothing keeping out of
-the spoon; cuts kept crisp, crumbs blended at the stamp; taller bowl grids to retain stacked scoops). (To match it the core
+the spoon; cuts kept crisp, crumbs blended at the stamp; taller bowl grids to retain stacked scoops;
+displaced volume repaid over an area to prevent towers). (To match it the core
 keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
 `v8math.rs`, and the same RNG.) `rust/cli/tests/control.rs` starts a real headless server and checks the
 hello, a scoop driven by `step` commands, `eat`, and a ROS-frame state stream. `rust/cli/tests/render.rs`

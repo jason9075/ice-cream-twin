@@ -175,3 +175,34 @@ fn a_scoop_landing_on_a_high_pile_merges_instead_of_becoming_static_balls() {
     assert!(sim.grids[1].sample(0.0, 0.15, 0.0) < 0.0, "upper scoop was not stored in bowl SDF");
     assert!((sim.total_grams()-before).abs()<0.1, "mass changed");
 }
+
+/// Reduced from operations-1794193153013559606: a downward dig near the bowl's edge,
+/// then lift. Repaying displaced volume along one ray used to grow a thin tower.
+#[test]
+fn a_deep_dig_redistributes_ice_without_growing_a_tower() {
+    let mut sim = Sim::default();
+    let top = |sim: &Sim| {
+        let grid = &sim.grids[1];
+        grid.data.iter().enumerate().filter(|(_, d)| **d < 0.0)
+            .map(|(i, _)| grid.center(i)[1]).fold(0.0, f64::max)
+    };
+    let initial = top(&sim);
+    let before = sim.total_grams();
+    let q = Quat::new(0.07465, 0.66236, 0.05047, 0.74375).normalize();
+    sim.spoon.pos = Vec3::new(-0.03477, 0.15, 0.02501);
+    sim.spoon.quat = q;
+    sim.sync_spoon();
+    let mut maximum = initial;
+    for (y, n) in [(0.0, 240), (0.19, 180)] {
+        sim.set_target(Some(Vec3::new(-0.03477, y, 0.02501)), Some(q));
+        for frame in 0..n {
+            sim.step(1.0 / 60.0);
+            if frame % 15 == 0 { maximum = maximum.max(top(&sim)); }
+        }
+    }
+    maximum = maximum.max(top(&sim));
+    eprintln!("dig: peak rise {:.1} mm, mass drift {:.3} g", (maximum-initial)*1000.0, sim.total_grams()-before);
+    assert!(maximum < initial + 0.025, "displaced ice grew into a tower");
+    assert!((sim.total_grams()-before).abs() < 0.1, "redistribution lost mass");
+    assert!(sim.debt_volume().abs() < 1e-6, "displaced ice stayed hidden in the ledger");
+}

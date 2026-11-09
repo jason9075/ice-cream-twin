@@ -84,9 +84,10 @@ fn the_arm_carries_a_scoop_out_of_the_middle_bowl_and_stays_on_the_spoon() {
             assert!(t.arm.q[k] >= lim[k][0] - 1e-9 && t.arm.q[k] <= lim[k][1] + 1e-9);
         }
     };
+    // A deeper pass through fresh ice supplies a full scoop without relying on repaid ridges.
     drive(&mut t, Vec3::new(0.0, 0.14, 0.02), facing(0.5), 80, &mut check);
-    drive(&mut t, Vec3::new(0.0, 0.086, 0.015), facing(0.5), 150, &mut check);
-    drive(&mut t, Vec3::new(0.0, 0.088, -0.025), facing(0.0), 150, &mut check);
+    drive(&mut t, Vec3::new(0.0, 0.070, 0.015), facing(0.5), 150, &mut check);
+    drive(&mut t, Vec3::new(0.0, 0.072, -0.025), facing(0.0), 150, &mut check);
     drive(&mut t, Vec3::new(0.0, 0.15, -0.03), facing(0.0), 100, &mut check);
     let st = t.sim.state();
     assert!(st.scooped_grams > 10.0, "scooped only {:.1} g", st.scooped_grams);

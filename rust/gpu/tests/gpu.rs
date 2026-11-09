@@ -333,10 +333,11 @@ fn the_arm_carries_a_gpu_scoop() {
     let Some(g) = gpu() else { return };
     let mut t = GpuTwin::from_sim(g);
     let mut worst = 0f64;
+    // Match the core full-scoop arm test: cut through fresh ice at 70 mm.
     for (p, pitch, n) in [
         (Vec3::new(0.0, 0.14, 0.02), 0.5, 80),
-        (Vec3::new(0.0, 0.086, 0.015), 0.5, 150),
-        (Vec3::new(0.0, 0.088, -0.025), 0.0, 150),
+        (Vec3::new(0.0, 0.070, 0.015), 0.5, 150),
+        (Vec3::new(0.0, 0.072, -0.025), 0.0, 150),
         (Vec3::new(0.0, 0.15, -0.03), 0.0, 100),
     ] {
         t.sim.cpu.spoon.set_target(Some(p), Some(facing(pitch)));
@@ -401,6 +402,15 @@ fn a_released_scoop_keeps_its_shape_like_the_cpu() {
     eprintln!("scooped: GPU {:.1} g, CPU {:.1} g", g.state().scooped_grams, c.state().scooped_grams);
     let g_before = loose_extent(&g.particles).3;
     let c_before = loose_extent(&cpu_bytes(&c)).3;
+    // Compare release physics from the same scoop geometry and pose. Independently carved
+    // scoops can have different volumes after hundreds of f32/f64 steps; comparing their
+    // absolute heights would test that history rather than whether a lump keeps its shape.
+    let content = &g.l.grids[3];
+    g.debug_write('W', g.l.w.get("D") + content.off, bytemuck::cast_slice(&c.content.data));
+    g.debug_write('X', g.l.x.get("COL") + content.off, bytemuck::cast_slice(&c.content.color));
+    g.debug_write('W', g.l.w.get("ST") + st::CONTENT_VOL, bytemuck::cast_slice(&[c.content_volume as f32]));
+    g.stats.content_vol = c.content_volume;
+    g.cpu.spoon = c.spoon.clone();
     // tip it out on a level spoon: the scoop (one lump) should sit in the cup, not slump over the rim
     g.release();
     c.release();
@@ -566,4 +576,34 @@ fn a_scoop_landing_on_a_high_pile_freezes_without_static_crumbs() {
     g.cpu.grids[1].data = data;
     assert!(g.cpu.grids[1].sample(0.0, 0.15, 0.0) < 0.0, "upper scoop missing from bowl SDF");
     assert!((g.total_grams()-before).abs()<0.1, "mass changed");
+}
+
+/// Same near-edge plunge as the core regression; includes carving, ledger and smoothing.
+#[test]
+fn a_deep_dig_redistributes_ice_without_growing_a_tower() {
+    let Some(mut g) = gpu() else { return };
+    let top = |g: &GpuSim| {
+        let geo = &g.l.grids[1];
+        let data = g.debug_read_f32(g.l.w.get("D") + geo.off, geo.count);
+        data.iter().enumerate().filter(|(_, d)| **d < 0.0)
+            .map(|(i, _)| g.cpu.grids[1].center(i)[1]).fold(0.0, f64::max)
+    };
+    let initial = top(&g);
+    let before = g.total_grams();
+    let q = Quat::new(0.07465, 0.66236, 0.05047, 0.74375).normalize();
+    g.cpu.spoon.pos = Vec3::new(-0.03477, 0.15, 0.02501);
+    g.cpu.spoon.quat = q;
+    let mut maximum = initial;
+    for (y, n) in [(0.0, 240), (0.19, 180)] {
+        g.cpu.spoon.set_target(Some(Vec3::new(-0.03477, y, 0.02501)), Some(q));
+        for frame in 0..n {
+            g.step(1.0 / 60.0);
+            if frame % 15 == 0 { maximum = maximum.max(top(&g)); }
+        }
+    }
+    maximum = maximum.max(top(&g));
+    eprintln!("GPU dig: peak rise {:.1} mm, mass drift {:.3} g", (maximum-initial)*1000.0, g.total_grams()-before);
+    assert!(maximum < initial + 0.025, "displaced ice grew into a tower");
+    assert!((g.total_grams()-before).abs() < 0.1, "redistribution lost mass");
+    assert!(g.stats.debt_vol.abs() < 1e-6, "displaced ice stayed hidden in the ledger");
 }

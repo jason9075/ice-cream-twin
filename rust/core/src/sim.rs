@@ -34,6 +34,8 @@ const TABLE_DIMS: [usize; 3] = [288, 20, 160];
 /// re-deposit stamps per frame (keeps the frame time bounded)
 const DEBT_STAMPS_PER_FRAME: u32 = 48;
 const DEBT_MAX_ENTRIES: usize = 256;
+/// Prefer a nearby low surface: 4 mm less travel offsets 1 mm more height.
+const DEBT_DISTANCE_WEIGHT: f64 = 0.25;
 const BOWL_T_HALF: f64 = 0.0015;
 /// displaced ice becomes at most this many loose particles per frame; the rest goes
 /// straight onto the heap through the ledger
@@ -1036,7 +1038,7 @@ impl Sim {
         f64::NAN
     }
 
-    /// Put owed ice back on the lowest free ice surface near where it went missing, clear of
+    /// Put owed ice back on a low free ice surface, favoring nearby positions clear of
     /// the spoon; each stamp's real added volume is measured, overshoot becomes credit.
     fn pay_debts(&mut self) {
         self.set_pose(self.cur.pos, self.cur.quat);
@@ -1074,34 +1076,43 @@ impl Sim {
                 }
                 GridId::Bowl(bi) => {
                     let a = self.rand() * PI * 2.0;
-                    let (dx, dz) = (cos(a), sin(a));
                     let bw = &bowls()[bi];
                     let gr = &self.grids[bi];
-                    // stay inside the rim opening
                     let rim_in = bw.w - BOWL_T_HALF - rs - c;
-                    for t in 0..16 {
-                        let xx = e.x + dx * t as f64 * c;
-                        let zz = e.z + dz * t as f64 * c;
-                        if !gr.contains(xx, gr.oy + gr.sy * 0.5, zz, rs + c) {
-                            break;
-                        }
-                        if hypot2(xx - bw.cx, zz - bw.cz) > rim_in {
-                            continue;
-                        }
-                        let top = Sim::column_top(gr, xx, zz);
-                        if top.is_nan() || top > gr.oy + gr.sy - 2.0 * rs - c {
-                            continue;
-                        }
-                        if !(top < y) && !y.is_nan() {
-                            continue;
-                        }
-                        if self.under_cup(xx, top, zz, rs) {
-                            continue;
-                        }
-                        if self.clear_of_spoon(xx, top, zz, rs + 0.002) {
-                            x = xx;
-                            y = top;
-                            z = zz;
+                    let mut best_score = f64::INFINITY;
+                    // Displacement needs an area to spread into. A single ray concentrates
+                    // a deep cut's volume into a thin ridge, even if the rest of the bowl is lower.
+                    // Eight rays reach across the bowl. Quadratic radii sample densely near
+                    // the source as well; candidates outside the bowl are simply skipped.
+                    for ray in 0..8 {
+                        let angle = a + ray as f64 * (2.0 * PI / 8.0);
+                        let (dx, dz) = (cos(angle), sin(angle));
+                        for ring in 0..8 {
+                            let fraction = ring as f64 / 7.0;
+                            let radius = 2.0 * bw.w * fraction * fraction;
+                            let xx = e.x + dx * radius;
+                            let zz = e.z + dz * radius;
+                            if !gr.contains(xx, gr.oy + gr.sy * 0.5, zz, rs + c)
+                                || hypot2(xx - bw.cx, zz - bw.cz) > rim_in {
+                                continue;
+                            }
+                            let top = Sim::column_top(gr, xx, zz);
+                            if top.is_nan() || top > gr.oy + gr.sy - 2.0 * rs - c {
+                                continue;
+                            }
+                            let score = top + DEBT_DISTANCE_WEIGHT * hypot2(xx - e.x, zz - e.z);
+                            if score >= best_score {
+                                continue;
+                            }
+                            if self.under_cup(xx, top, zz, rs) {
+                                continue;
+                            }
+                            if self.clear_of_spoon(xx, top, zz, rs + 0.002) {
+                                best_score = score;
+                                x = xx;
+                                y = top;
+                                z = zz;
+                            }
                         }
                     }
                 }
