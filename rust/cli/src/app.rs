@@ -154,7 +154,7 @@ impl ApplicationHandler for App {
                         } else if down && !event.repeat {
                             match ch {
                                 'e' => g.panel.eat(g.engine.as_mut()),
-                                'h' => g.panel.home(g.engine.as_mut()),
+                                'b' => g.panel.home(g.engine.as_mut()),
                                 _ => {}
                             }
                         }

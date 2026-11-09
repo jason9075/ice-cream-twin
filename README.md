@@ -224,7 +224,7 @@ chain (`rust/core/src/robot/urdf.rs`).
 |---|---|
 | Hold a button or key | **A/D** X · **R/F** Y · **W/S** Z · **U/O** Rx · **J/L** Ry · **K/I** Rz (World / Tool frame toggle) |
 | Mouse | left-drag orbit · right-drag or Shift+drag pan · wheel zoom · **Ctrl+drag** move target (horizontal plane) · **Ctrl+wheel** target height |
-| Other | **E** Eat (empty the spoon) · **H** home · **Space** pause · Tip off · Reset · Go to pose (mm / degrees, XYZ Euler) |
+| Other | **E** Eat (empty the spoon) · **B** home · **Space** pause · Tip off · Reset · Go to pose (mm / degrees, XYZ Euler) |
 
 The side panel adjusts everything live: fluid (particle radius, viscosity, cohesion, friction, damping,
 gravity, iterations, lump stiffness / yield…), freezing, ice cream (hardness in kPa, accretion, capacity,

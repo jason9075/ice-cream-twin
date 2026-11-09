@@ -192,7 +192,7 @@ impl Panel {
                 ui.label(RichText::new(
                     "Mouse: left-drag orbit · right-drag or Shift+drag pan · wheel zoom · Ctrl+drag moves the target \
                      on its horizontal plane · Ctrl+wheel its height. Keys: A/D X · R/F Y · W/S Z · U/O Rx · J/L Ry · \
-                     K/I Rz · E eat · H home · Space pause.",
+                     K/I Rz · E eat · B home · Space pause.",
                 ).small().weak());
             });
         });
