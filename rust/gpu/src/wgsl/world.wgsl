@@ -155,7 +155,8 @@ fn carveMark(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid
         nw = min(nw, band);
         let dv = occ(g, w) - occ(g, nw);
         W[k] = nw;
-        touch(g, idx);
+        // a cut keeps its edge: smoothing only melts in what is stamped (unless smoothCuts, G.g8.z)
+        if (G.g8.z > 0.5) { touch(g, idx); } else { distChanged(g); }
         removed = dv;
         let accrete = G.g7.y > 0.5 && !tilted && W[W_ST + S_contentVol] < G.g5.z;
         let isMetal = dS <= dI && dS <= dC;

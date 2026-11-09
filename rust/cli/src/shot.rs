@@ -55,7 +55,8 @@ fn facing(pitch: f64) -> Quat {
     Quat::from_axis_angle(V3::new(0.0, 1.0, 0.0), PI / 2.0).mul(Quat::from_axis_angle(V3::new(0.0, 0.0, 1.0), pitch))
 }
 
-pub fn run(dir: &Path, cpu: bool) {
+/// `params`: a set_params patch applied before anything happens (A/B comparisons).
+pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>) {
     std::fs::create_dir_all(dir).expect("output directory");
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).expect("no GPU adapter");
@@ -67,6 +68,12 @@ pub fn run(dir: &Path, cpu: bool) {
     device.on_uncaptured_error(Box::new(move |e| sink.lock().unwrap().push(e.to_string())));
     let engine = open_on(cpu, Some((device.clone(), queue.clone(), format!("{} ({:?})", info.name, info.backend))));
     let renderer = Renderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, &scene_desc(engine.as_ref()));
+    let mut engine = engine;
+    if let Some(patch) = params {
+        let mut p = engine.params().clone();
+        crate::protocol::apply_params(&mut p, patch).expect("--params");
+        engine.set_params(p);
+    }
     let mut s = Shot { engine, renderer, sync: Sync::default(), camera: OrbitCamera::default(), view: ViewOptions::default(), dir: dir.to_path_buf() };
 
     s.steps(30);

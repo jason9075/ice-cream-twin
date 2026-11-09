@@ -59,14 +59,18 @@ Ice cream exists in two forms that convert into each other:
   travel (accretion), which gives the curl. Ice pushed aside by the metal becomes particles.
 - **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
   into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`).
-- **Surface tension**: every frame the edited voxels get one **volume-preserving** Laplacian smoothing pass,
-  then keep "settling" for 30 frames, so a scoop rounds into a ball without losing mass. In the bowls it
-  never fills what the spoon occupies (metal, cup interior, the scoop): otherwise the next carve cuts the
-  refilled ice again and a spoon held still pumps ice into the cup until it is full, or stops by chance,
-  which is also why GPU and CPU once scooped 16.8 vs 12.3 g from the same bowl. Pressing straight down
-  therefore scoops nothing (the metal cuts the ice before the cup gets there); dragging or lifting does. While the scoop
+- **Surface tension**: the edited voxels get a **volume-preserving** Laplacian smoothing pass. On the spoon
+  it keeps "settling" for 30 frames, so a scoop rounds into a ball without losing mass; while the scoop
   changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
-  freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup.
+  freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup. **In the
+  bowls only what is stamped is smoothed** (frozen crumbs, repaid ice), once, and never into what the spoon
+  occupies; **what the spoon cuts keeps its edge** (`ice.smoothCuts` turns the old behaviour back on).
+  Smoothing everything for 30 frames made every cut melt into a soft valley, the main reason the ice
+  looked watery; it also let a spoon held still pump ice into the cup (smoothing refilled the cut, the next
+  carve cut it again), which is why GPU and CPU once scooped 16.8 vs 12.3 g from the same bowl. Crumbs melt
+  in through the stamp's smooth-min instead (`stamp smoothing`, 2.5 mm), as Claybook's `k_smooth`. Pressing
+  straight down scoops nothing (the metal cuts the ice before the cup gets there), and plunging into the
+  same hole again brings up less (21, 6.6, 1.4 g): dragging or lifting through fresh ice is what scoops.
 - **Tipping**: tilt the spoon past `slide-off tilt` and the scoop turns into particles and falls.
 - **Lumps**: PBF particles alone are a liquid: the density constraint pushes the edges of any pile outward
   every sub-step, so a released scoop slumped into a puddle and ran over the rim (neither particle friction
@@ -113,12 +117,12 @@ uses the previous frame's carving.
   | prefix scans, volume reduction | exact (u32), < 10⁻⁵ (f32) |
   | volume-preserving smoothing + settling of 2,111 edited voxels, the spoon in them | max difference 5·10⁻⁶ cell |
   | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
-  | scoop, carry, eat (510 frames) | 17.9 g scooped (CPU 18.2 g), mass drift 0.009 g |
-  | straight down into each bowl, held, lifted | held: no gain; lifted out 18.2 / 7.2 / 14.8 g (CPU 18.3 / 7.2 / 13.2 g) |
-  | tip-out | scoop gone, ~1,600 particles, frozen back 4 s later, drift 0.04 g |
-  | a scoop released on a level spoon | stays in the cup as one lump, as tall as on the CPU |
-  | three plunges + eat | 58.5 g eaten, drift 0.01 g |
-  | the SO-101 carrying a GPU scoop | 11.6 g, arm within 0.33 mm of the spoon |
+  | scoop, carry, eat (510 frames) | 19.4 g scooped (CPU 18.5 g), mass drift 0.009 g |
+  | straight down into each bowl, held, lifted | held: no gain; lifted out 17.4 / 5.2 / 12.6 g (CPU 14.6 / 4.5 / 14.8 g) |
+  | tip-out | scoop gone, ~1,350 particles, frozen back 4 s later, drift 0.01 g |
+  | a scoop released on a level spoon | stays in the cup as one lump (10.5 → 10.4 mm tall after 20 frames) |
+  | three plunges into the same hole + eat | 31.4 g eaten, drift 0.01 g |
+  | the SO-101 carrying a GPU scoop | ~12 g, arm within 0.33 mm of the spoon |
   | two identical runs | bit-identical |
 
 - **Speed** (RTX 3080 Ti, Vulkan): a scoop takes ~2 ms/frame with the arm (CPU ~3–4 ms), 15,000 loose
@@ -200,7 +204,7 @@ chain (`rust/core/src/robot/urdf.rs`).
 
 The side panel adjusts everything live: fluid (particle radius, viscosity, cohesion, friction, damping,
 gravity, iterations, lump stiffness / yield…), freezing, ice cream (hardness in kPa, accretion, capacity,
-slide-off angle, surface smoothing, density, refill shape) and the spoon controller (max speeds, max cutting force), with the same
+slide-off angle, scoop and bowl smoothing, smooth cut edges, density, refill shape) and the spoon controller (max speeds, max cutting force), with the same
 commands a controller sends (`rust/cli/src/ui.rs`). **View** is drawing only:
 - **loose particles**: `surface` (default) melts them into one smooth surface: each frame compute passes
   find their bounding box, fit a grid to it, splat them and build the smoothed-particle distance of Zhu &
@@ -244,7 +248,8 @@ scoops vanilla → eats → scoops mint → eats, with the handle pointed at the
 **`icecream serve`** (`just stdio`) takes the same commands as JSON lines on stdin and answers on stdout, for
 a ROS node or a script that runs the twin as a subprocess (no real-time loop: it advances on `step`).
 
-**`icecream shot [DIR]`** (`just screenshots`) renders a scripted session off screen: the SO-101 scoops
+**`icecream shot [DIR] [--params JSON]`** (`just screenshots`) renders a scripted session off
+screen (`--params` patches the parameters first, for A/B comparisons): the SO-101 scoops
 strawberry, close-ups of the spoon and the gripper, the scoop rolled off into the bowl, and the same frame
 through the debug views; it prints a JSON summary and fails on any GPU validation error.
 
@@ -252,14 +257,14 @@ through the debug views; it prints a JSON summary and fails on any GPU validatio
 
 ```bash
 just test     # cargo test: collision, mass, arm, fixture regression, GPU vs CPU, rendering, the control server
-just bench    # CPU: ~6 ms/frame, mass 2075.3 -> 2075.3 g; arm-driven scoop ~4 ms/frame; the same scoop on the GPU ~1.6
+just bench    # CPU: mass 2075.3 -> 2075.3 g; arm-driven scoop ~2 ms/frame; the same scoop on the GPU ~1.4
 ```
 
 `rust/core/tests/parity.rs` replays scripted runs (a scoop, plunge-and-eat cycles, an arm-driven run) against
 fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit port. The JavaScript is gone;
 the fixtures stay as a regression net: any change to the numerics shows up there. When a change is meant to
-alter the numbers, `UPDATE_FIXTURES=1` rewrites them from the Rust core (done once: smoothing keeping out of
-the spoon). (To match it the core
+alter the numbers, `UPDATE_FIXTURES=1` rewrites them from the Rust core (done for: smoothing keeping out of
+the spoon; cuts kept crisp, crumbs blended at the stamp). (To match it the core
 keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
 `v8math.rs`, and the same RNG.) `rust/cli/tests/control.rs` starts a real headless server and checks the
 hello, a scoop driven by `step` commands, `eat`, and a ROS-frame state stream. `rust/cli/tests/render.rs`

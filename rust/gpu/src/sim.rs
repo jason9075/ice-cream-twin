@@ -635,7 +635,7 @@ impl GpuSim {
         put(28, [f64::from(u8::from(tilt < ip.release_angle - 10.0)), f64::from(u8::from(ip.accretion)), ip.release_angle, tilt]);
         put(48, [sp.lin_vel.x, sp.lin_vel.y, sp.lin_vel.z, 0.0]);
         put(52, [sp.ang_vel.x, sp.ang_vel.y, sp.ang_vel.z, 0.0]);
-        put(60, [fp.lump_stiffness, fp.lump_yield * r, 0.0, 0.0]);
+        put(60, [fp.lump_stiffness, fp.lump_yield * r, f64::from(u8::from(ip.smooth_cuts)), 0.0]);
         g[32..36].copy_from_slice(&pose.r0);
         g[36..40].copy_from_slice(&pose.r1);
         g[40..44].copy_from_slice(&pose.r2);
@@ -793,9 +793,14 @@ impl GpuSim {
         self.run(&mut fr, "ledgerPay", 1, cup_pass);
         // 7. surface tension: volume-preserving smoothing of what was edited, then settling
         let sm = self.cpu.params.ice.smoothing;
+        let bsm = self.cpu.params.ice.bowl_smoothing;
         for k in 0..3 {
-            self.smooth(&mut fr, k, 0, sm);
-            self.smooth(&mut fr, k, 1, sm);
+            self.smooth(&mut fr, k, 0, bsm);
+            // settling smooths the whole recently edited box for 30 frames: that would round the cuts off
+            // again, so only with smooth_cuts
+            if self.cpu.params.ice.smooth_cuts {
+                self.smooth(&mut fr, k, 1, bsm);
+            }
         }
         self.smooth(&mut fr, 3, 0, sm);
         if self.content_edited || self.stats.settle_frames[3] > 0 {

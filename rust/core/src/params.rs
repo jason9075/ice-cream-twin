@@ -59,6 +59,10 @@ pub struct IceParams {
     pub density: f64,
     /// 0..1 Laplacian pass on edited voxels each frame
     pub smoothing: f64,
+    /// 0..1, the same for the ice in the bowls (cuts and stamped crumbs); low keeps cut edges crisp
+    pub bowl_smoothing: f64,
+    /// smooth what the spoon cut too (false: only stamped crumbs and repaid ice melt in, cut edges stay)
+    pub smooth_cuts: bool,
     pub shape: FillShape,
 }
 
@@ -99,7 +103,7 @@ impl Default for FluidParams {
             stop_speed: 0.035,
             rest_frames: 5,
             stamp_scale: 1.3,
-            stamp_smooth: 0.0012,
+            stamp_smooth: 0.0025,
             stamp_on_contact: false,
         }
     }
@@ -116,6 +120,8 @@ impl Default for IceParams {
             displaced_to_particles: true,
             density: 0.6,
             smoothing: 0.5,
+            bowl_smoothing: 1.0,
+            smooth_cuts: false,
             shape: FillShape::Scoops,
         }
     }

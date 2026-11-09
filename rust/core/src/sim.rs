@@ -419,13 +419,18 @@ impl Sim {
         self.freeze_resting(tilt < release - 10.0, dt);
         self.pay_debts();
         let sm = self.params.ice.smoothing;
+        let bsm = self.params.ice.bowl_smoothing;
         let tilted_now = tilt > release;
         for i in 0..3 {
             let g = &self.grids[i];
             {
                 let keep_out = spoon_keep_out(self.pose, &self.content, tilted_now, [g.ox, g.oy, g.oz, g.cell], [g.nx, g.ny], g.band);
-                self.grids[i].smooth_touched(sm, &keep_out);
-                self.grids[i].settle(sm, true, &keep_out);
+                self.grids[i].smooth_touched(bsm, &keep_out);
+                // settling smooths the whole recently edited box for 30 frames: that would round the cuts
+                // off again, so only with smooth_cuts
+                if self.params.ice.smooth_cuts {
+                    self.grids[i].settle(bsm, true, &keep_out);
+                }
             }
             self.settle_residual(GridId::Bowl(i));
         }
@@ -597,6 +602,7 @@ impl Sim {
         let k0 = 0i64.max(((bx[2] - oz) / c).floor() as i64);
         let k1 = fl((bx[5] - oz) / c, nz);
         let to_particles = self.params.ice.displaced_to_particles;
+        let smooth_cuts = self.params.ice.smooth_cuts;
         let pr = if self.fluid.r > 0.0 { self.fluid.r } else { self.params.fluid.particle_radius };
         let vp = 8.0 * pr * pr * pr;
         let mut displaced = 0.0;
@@ -655,7 +661,10 @@ impl Sim {
                     }
                     let dv = (occ(w) - occ(nw)) * c3;
                     self.grids[gi].data[idx] = nw as f32;
-                    self.grids[gi].touch(idx);
+                    // a cut keeps its edge: smoothing only melts in what is stamped (unless smooth_cuts)
+                    if smooth_cuts {
+                        self.grids[gi].touch(idx);
+                    }
                     changed = true;
                     self.removed += dv;
                     let is_metal = ds <= di && ds <= dc;

@@ -69,13 +69,17 @@ fn plunging_to_the_bottom_keeps_the_mass() {
     let b = &bowls()[0];
     let level = Quat::IDENTITY;
     let t0 = Instant::now();
+    let mut grams = Vec::new();
     for _ in 0..3 {
         run_to(&mut sim, Vec3::new(b.cx, 0.14, 0.0), level, 60);
         run_to(&mut sim, Vec3::new(b.cx, 0.0, 0.0), level, 240);
         run_to(&mut sim, Vec3::new(b.cx, 0.15, 0.0), level, 150);
-        assert!(sim.state().scooped_grams > 5.0, "each plunge should bring up a scoop");
+        grams.push(sim.state().scooped_grams);
         sim.eat();
     }
+    // the same hole each time: the cut walls stay, so later plunges bring up less
+    println!("plunges: {grams:.1?} g");
+    assert!(grams[0] > 5.0 && grams.iter().sum::<f64>() > 15.0, "plunges brought up {grams:?} g");
     let after = sim.total_grams();
     let ms = t0.elapsed().as_secs_f64() * 1000.0 / 1350.0;
     println!("plunge x3: mass {before:.1} -> {after:.1} g, eaten {:.1} g, {ms:.2} ms/frame", sim.state().eaten_grams);

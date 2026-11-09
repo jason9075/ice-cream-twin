@@ -14,7 +14,7 @@ struct Globals {
   R0: vec4f, R1: vec4f, R2: vec4f, T: vec4f, // spoon pose after the spoon step (rows of R, position)
   lin: vec4f, ang: vec4f,                    // spoon velocity
   u0: vec4u,                                 // frame, spawn budget, debt stamps per frame, max debts
-  g8: vec4f,                                 // lumpStiffness, lumpYield (m)
+  g8: vec4f,                                 // lumpStiffness, lumpYield (m), smoothCuts
 }
 struct Pass {
   i0: vec4i, i1: vec4i, i2: vec4i, i3: vec4i,
