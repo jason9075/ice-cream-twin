@@ -77,7 +77,7 @@ fn main() {
         s.set_target(Some(p), Some(q));
         for f in 0..n {
             s.step(1.0 / 60.0);
-            if log && f % 5 == 0 && f >= 40 && f <= 100 {
+            if log && f % 5 == 0 && (40..=100).contains(&f) {
                 let fl = &s.fluid;
                 let n = fl.n;
                 let airs: Vec<usize> = (0..n).filter(|&i| fl.contact[i] == 0).collect();

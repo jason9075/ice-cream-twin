@@ -442,3 +442,60 @@ fn a_held_spoon_scoops_nothing_more_in_every_bowl() {
         assert!(cs > 3.0 && (gs - cs).abs() < 0.2 * cs + 0.5, "bowl {bi}: GPU {gs:.1} g vs CPU {cs:.1} g");
     }
 }
+
+/// A scoop dropped on the table freezes into the table's SDF on the GPU too (not static crumbs), as much
+/// as on the CPU, keeping the mass; then it is scraped back up.
+#[test]
+fn a_scoop_dropped_on_the_table_freezes_there_like_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut c = Sim::default();
+    let b = &bowls()[2];
+    let level = Quat::IDENTITY;
+    let scrape = Quat::from_euler(0.0, 0.0, 1.45); // opening toward -x, handle up
+    let legs = [
+        (Vec3::new(b.cx, 0.14, 0.0), level, 60),
+        (Vec3::new(b.cx, 0.085, 0.0), level, 150),
+        (Vec3::new(b.cx, 0.15, 0.0), level, 120),
+        (Vec3::new(0.27, 0.12, 0.12), level, 90),
+        (Vec3::new(0.27, 0.12, 0.12), Quat::from_euler(PI * 0.9, 0.0, 0.0), 120),
+        (Vec3::new(0.27, 0.12, 0.12), Quat::from_euler(PI * 0.9, 0.0, 0.0), 240),
+    ];
+    g.step(1.0 / 60.0);
+    c.step(1.0 / 60.0);
+    let (g0, c0) = (g.total_grams(), c.total_grams());
+    let mut scooped = (0.0, 0.0);
+    for (k, (p, q, n)) in legs.into_iter().enumerate() {
+        drive(&mut g, p, q, n, |_| {});
+        c.set_target(Some(p), Some(q));
+        c.step_frames(n);
+        if k == 2 {
+            scooped = (g.state().scooped_grams, c.state().scooped_grams);
+        }
+    }
+    c.update_stats(true);
+    let (gt, ct) = (g.state().table_grams, c.state().table_grams);
+    eprintln!(
+        "dropped on the table: GPU {:.1} g -> {gt:.1} g frozen there, {} crumbs, {} loose; CPU {:.1} g -> {ct:.1} g, {} crumbs, {} loose; mass drift {:.3} / {:.3} g",
+        scooped.0, g.stats.spilled, g.stats.n, scooped.1, c.n_spilled, c.fluid.n, g.total_grams() - g0, c.total_grams() - c0
+    );
+    assert!(gt > 0.6 * scooped.0 && ct > 0.6 * scooped.1, "it should freeze onto the table");
+    assert!(g.stats.spilled < 20 && c.n_spilled < 20, "not as static crumbs");
+    assert!((g.total_grams() - g0).abs() < 0.2 && (c.total_grams() - c0).abs() < 0.2);
+
+    g.eat();
+    c.eat();
+    for (p, q, n) in [
+        (Vec3::new(0.34, 0.09, 0.13), scrape, 120),
+        (Vec3::new(0.34, 0.022, 0.13), scrape, 90),
+        (Vec3::new(0.22, 0.022, 0.13), scrape, 180),
+        (Vec3::new(0.22, 0.09, 0.13), level, 120),
+    ] {
+        drive(&mut g, p, q, n, |_| {});
+        c.set_target(Some(p), Some(q));
+        c.step_frames(n);
+    }
+    let (ga, ca) = (g.state().scooped_grams, c.state().scooped_grams);
+    eprintln!("scraped back up: GPU {ga:.1} g, CPU {ca:.1} g; mass drift {:.3} / {:.3} g", g.total_grams() - g0, c.total_grams() - c0);
+    assert!(ga > 0.5 && ca > 0.5);
+    assert!((g.total_grams() - g0).abs() < 0.2);
+}

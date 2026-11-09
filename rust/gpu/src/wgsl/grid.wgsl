@@ -280,6 +280,13 @@ fn smWrite(@builtin(local_invocation_id) lid: vec3u) {
   var vb = 0.0;
   for (var w = t; w < (total + 255u) / 256u; w += 256u) { vb += W[W_PART + w]; }
   vb = wgSum(t, vb);
+  if (g == TABLE_G && mode == 0 && P.f0.x > 0.0) {
+    // what the table owes (stamps hold more than a particle) comes off its own ice here (Sim.table_owed)
+    vb += W[W_ST + S_tableOwed] / (GO[g].w * GO[g].w * GO[g].w);
+    storageBarrier();
+    workgroupBarrier();
+    if (t == 0u) { W[W_ST + S_tableOwed] = 0.0; }
+  }
   if (mode == 0) {
     // this frame's edits: clear the flags, grow the settle box, keep settling for 30 frames
     for (var q = t; q < n; q += 256u) { X[X_FLAG + n3.w + X[X_LIST + n3.w + q]] = 0u; }

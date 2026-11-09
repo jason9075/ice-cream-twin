@@ -2,8 +2,10 @@
 // DieWhenStops + StampSDFWhenDies. Deciding is parallel; stamping is done one particle after another
 // (in the CPU's order, highest index first) by one workgroup, all 256 threads sharing each stamp's
 // voxels, so overlapping stamps and their measured volumes come out the same as on the CPU.
-// codes in FRZ: 0 keep, 1..3 stamp into bowl grid code-1, 4 stamp into the scoop, 5 spill on the
-// table, 6 out of the world (removed), 7 squeezed between spoon and bowl (owed to the bowl)
+// codes in FRZ: 0 keep, 1..3 stamp into bowl grid code-1, 4 stamp into the scoop, 5 a static crumb
+// (outside every grid), 6 out of the world (removed), 7 squeezed between spoon and bowl (owed to the
+// bowl), 8 stamp into the table. A lump that has landed (LUMP_LANDING_FRAMES touching the world)
+// freezes whole, in the shape it landed in.
 fn embedded(contact: u32, p: vec3f) -> bool {
   let r = G.g1.x;
   if (contact == 1u) {
@@ -11,6 +13,28 @@ fn embedded(contact: u32, p: vec3f) -> bool {
     return g != 99u && gsample(g, p) < 0.5 * r;
   }
   return gsample(3u, toLocal(G.R0, G.R1, G.R2, G.T, p)) < 0.5 * r;
+}
+
+const LUMP_LANDING_FRAMES: u32 = 6u;
+// per lump: touching the world this frame (any of its particles), then count the frames in a row
+@compute @workgroup_size(64)
+fn lumpTouch(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= nParticles()) { return; }
+  let l = X[X_LUMP + i];
+  if (l != 0u && X[X_CONTACT + i] == 1u) { X[X_STU + SU_lumpTouch + l] = 1u; }
+}
+@compute @workgroup_size(1)
+fn lumpLand() {
+  for (var l = 1u; l <= MAX_LUMPS; l++) {
+    let k = X_STU + SU_lumpLanded + l;
+    X[k] = select(0u, X[k] + 1u, X[X_STU + SU_lumpTouch + l] != 0u);
+    X[X_STU + SU_lumpTouch + l] = 0u;
+  }
+}
+fn lumpLanded(i: u32) -> bool {
+  let l = X[X_LUMP + i];
+  return l != 0u && X[X_STU + SU_lumpLanded + l] >= LUMP_LANDING_FRAMES;
 }
 
 @compute @workgroup_size(64)
@@ -28,7 +52,8 @@ fn freezeMark(@builtin(global_invocation_id) id: vec3u) {
       code = 7u;
     } else {
       let contact = X[X_CONTACT + i];
-      if (contact == 0u) {
+      let landed = lumpLanded(i);
+      if (contact == 0u && !landed) {
         X[X_REST + i] = 0u;
       } else {
         // net displacement over the frame relative to the surface it rests on, smoothed
@@ -40,7 +65,7 @@ fn freezeMark(@builtin(global_invocation_id) id: vec3u) {
         X[X_REST + i] = rest;
         let instant = G.g6.y > 0.5 && contact == 1u && X[X_AGE + i] > 3u;
         let emb = slow < 3.0 * G.g4.x && embedded(contact, p);
-        if (f32(rest) >= G.g4.y || instant || emb) {
+        if (f32(rest) >= G.g4.y || instant || emb || (landed && contact != 2u)) {
           if (contact == 2u) {
             if (G.g7.x > 0.5) {
               let l = toLocal(G.R0, G.R1, G.R2, G.T, p);
@@ -49,7 +74,7 @@ fn freezeMark(@builtin(global_invocation_id) id: vec3u) {
             }
           } else {
             let g = gridAt(p);
-            if (g != 99u && gcontains(g, p, rs + GO[g].w)) { code = 1u + g; } else { code = 5u; }
+            if (g != 99u && gcontains(g, p, rs + GO[g].w)) { code = select(1u + g, 8u, g == TABLE_G); } else { code = 5u; }
           }
         }
       }
@@ -121,6 +146,9 @@ fn freezeStamp(@builtin(local_invocation_id) lid: vec3u) {
       let l = toLocal(G.R0, G.R1, G.R2, G.T, p);
       let added = stampCoop(t, 3u, l, rs, G.g4.w, rgba);
       if (t == 0u) { settle(3u, l, vp - added); }
+    } else if (code == 8u) {
+      let added = stampCoop(t, TABLE_G, p, rs, G.g4.w, rgba);
+      if (t == 0u) { settle(TABLE_G, p, vp - added); }
     } else if (t == 0u) {
       if (code == 5u) {
         let s = atomicLoad(&A[A_CNT + C_spilled]);

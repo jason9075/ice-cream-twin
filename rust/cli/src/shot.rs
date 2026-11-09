@@ -133,6 +133,28 @@ pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>, glossy: bo
         set(&mut s.view);
         s.save(name);
     }
+    // a scoop of mint dropped on the table behind the bowls: it freezes into the table's SDF
+    s.view = ViewOptions { ice_matte: !glossy, ..Default::default() };
+    let b = icecream_core::sdf::bowls()[2].cx;
+    s.go([b, 0.14, 0.02], facing(0.5), 80);
+    s.go([b, 0.086, 0.015], facing(0.5), 150);
+    s.go([b, 0.088, -0.025], facing(0.0), 150);
+    s.go([b, 0.15, -0.03], facing(0.0), 100);
+    let spot = [0.29, 0.12, -0.13];
+    s.go(spot, facing(0.0), 120);
+    s.engine.set_target(Some(V3::new(spot[0], spot[1], spot[2])), Some(roll));
+    let mut n = 0;
+    while s.engine.state().scooped_grams > 0.5 && n < 300 {
+        s.steps(5);
+        n += 5;
+    }
+    s.steps(90);
+    s.go([0.0, 0.17, 0.02], facing(0.0), 90);
+    s.camera.look_from(Vec3::new(0.42, 0.2, 0.08), Vec3::new(0.28, 0.0, -0.13));
+    s.save("12-table-drop.png");
+    s.view.grid_boxes = true;
+    s.save("13-table-grid.png");
+    let table = s.engine.state();
     let errors = errors.lock().unwrap().clone();
     println!(
         "{}",
@@ -142,6 +164,7 @@ pub fn run(dir: &Path, cpu: bool, params: Option<&serde_json::Value>, glossy: bo
             "armTrackingErrorMm": s.engine.arm().err.mm,
             "rolledFrames": rolled,
             "drop": drops,
+            "table": { "grams": table.table_grams, "crumbs": table.spilled_grams, "loose": table.particles },
             "gpuErrors": errors,
         }))
         .unwrap()

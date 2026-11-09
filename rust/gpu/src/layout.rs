@@ -7,6 +7,7 @@
 //! globals `G` and per-dispatch parameters `P` (a dynamic offset into one uniform buffer).
 
 use icecream_core::fluid::MAX_LUMPS;
+use icecream_core::sim::TABLE as TABLE_GRID;
 use icecream_core::sdf::{bowls, BOWL_SPACING, SPOON};
 use icecream_core::Sim;
 use std::collections::BTreeMap;
@@ -80,7 +81,8 @@ pub mod st {
     pub const RESIDUAL: u32 = 40;
     pub const NEG_SETTLE: u32 = 48;
     pub const VOLUME: u32 = 56;
-
+    /// m³ the table still owes (Sim.table_owed)
+    pub const TABLE_OWED: u32 = 30;
     pub const GAINED: u32 = 24;
     pub const CONTENT_VOL_START: u32 = 25;
     pub const DISPLACED_FRAME: u32 = 26;
@@ -92,7 +94,7 @@ pub mod st {
         ("spilledVol", SPILLED_VOL), ("eatenVol", EATEN_VOL), ("contentVol", CONTENT_VOL), ("debtVol", DEBT_VOL),
         ("credit", CREDIT), ("residual", RESIDUAL), ("negSettle", NEG_SETTLE), ("volume", VOLUME), ("gained", GAINED),
         ("contentVolStart", CONTENT_VOL_START), ("displacedFrame", DISPLACED_FRAME), ("spoonTop", SPOON_TOP), ("gpuMs", GPU_MS),
-        ("debtSpilled", DEBT_SPILLED), ("_pad0", 30), ("_pad1", 31),
+        ("debtSpilled", DEBT_SPILLED), ("tableOwed", TABLE_OWED), ("_pad1", 31),
     ];
 }
 pub mod stu {
@@ -111,12 +113,16 @@ pub mod stu {
     pub const LUMP_NEXT: u32 = 19;
     /// NG distance + NG colour "changed this frame" marks
     pub const DIRTY: u32 = 64;
+    /// per lump: touched the world this frame / frames it has (MAX_LUMPS + 1 each)
+    pub const LUMP_TOUCH: u32 = 80;
+    pub const LUMP_LANDED: u32 = 140;
     /// smoothing boxes: 8 per grid
     pub const BOXES: u32 = 96;
-    pub const ALL: [(&str, u32); 13] = [
+    pub const ALL: [(&str, u32); 15] = [
         ("nDebts", N_DEBTS), ("settleFrames", SETTLE_FRAMES), ("residualIdx", RESIDUAL_IDX), ("redistPending", REDIST_PENDING),
         ("rng", RNG), ("frame", FRAME), ("firstColor", FIRST_COLOR), ("spawnLeft", SPAWN_LEFT), ("released", RELEASED),
-        ("releasing", RELEASING), ("lumpNext", LUMP_NEXT), ("dirty", DIRTY), ("boxes", BOXES),
+        ("releasing", RELEASING), ("lumpNext", LUMP_NEXT), ("dirty", DIRTY), ("lumpTouch", LUMP_TOUCH), ("lumpLanded", LUMP_LANDED),
+        ("boxes", BOXES),
     ];
 }
 pub mod cnt {
@@ -141,8 +147,8 @@ impl Layout {
         let mut grids = Vec::new();
         let mut off = 0;
         let mut bin_off = 0;
-        // GPU order: the bowls, the scoop (3)
-        for (k, g) in sim.grids.iter().chain([&sim.content]).enumerate() {
+        // GPU order: the bowls, the scoop (3), the table (4)
+        for (k, g) in sim.grids[..TABLE_GRID].iter().chain([&sim.content, &sim.grids[TABLE_GRID]]).enumerate() {
             let n = [g.nx as u32, g.ny as u32, g.nz as u32];
             let bins = n.map(|v| v.div_ceil(BIN));
             let mut info = GridInfo { o: [g.ox, g.oy, g.oz], c: g.cell, n, count: g.n as u32, off, band: g.band, bins, bin_off: 0 };
@@ -174,7 +180,7 @@ impl Layout {
             ("CS", TABLE + 1), ("NB", MAXN * CAP), ("SRGBA", MAX_SPILLED), ("DEBTU", 3 * MAX_DEBTS), ("STU", 256),
             ("SCANU", maxr), ("PRE", maxr), ("BINL", nbins),
         ]);
-        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", NG as u32 * 8), ("SMB", NG as u32 * 8)]);
+        let a = Sections::new(&[("CNT", 64), ("CC", TABLE + 1), ("BINS", nbins), ("BOX", NG as u32 * 8), ("SMB", NG as u32 * 8), ("TABLEOWE", 1)]);
         Layout { grids, n, nc, maxr, nbins, w, x, a }
     }
 
@@ -218,7 +224,7 @@ impl Layout {
         let h = &SPOON.handle;
         let g = &self.grids;
         s += &format!(
-            "const NG: u32 = {NG}u;\nconst CAP: u32 = {CAP}u;\nconst MAX_LUMPS: u32 = {MAX_LUMPS}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
+            "const NG: u32 = {NG}u;\nconst TABLE_G: u32 = {TABLE_G}u;\nconst CAP: u32 = {CAP}u;\nconst MAX_LUMPS: u32 = {MAX_LUMPS}u;\nconst MAXN: u32 = {MAXN}u;\nconst TABLE: u32 = {TABLE}u;\nconst MASK: u32 = {}u;\n\
              const MAX_SPILLED: u32 = {MAX_SPILLED}u;\nconst MAX_DEBTS: u32 = {MAX_DEBTS}u;\nconst NBINS: u32 = {}u;\n\
              const BIN: u32 = {BIN}u;\nconst VOL_UNIT: f32 = {};\nconst NC: u32 = {}u;\nconst BIG: f32 = 1e9;\n\n",
             TABLE - 1,
@@ -262,8 +268,10 @@ impl Layout {
     }
 }
 
-/// Grids on the GPU: the three bowls, the scoop.
-pub const NG: usize = 4;
+/// Grids on the GPU: the three bowls, the scoop, the table.
+pub const NG: usize = 5;
+/// The GPU's index of the CPU's table grid (`sim.grids[TABLE]`).
+pub const TABLE_G: u32 = 4;
 
 /// u32 words per packed row of a grid `nx` voxels wide: (distance, colour), multiples of 64 (256 bytes).
 pub fn pack_row_words(nx: u32) -> (u32, u32) {

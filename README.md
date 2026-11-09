@@ -51,14 +51,19 @@ Ice cream exists in two forms that convert into each other:
 
 | Form | Stored as | When |
 |---|---|---|
-| Solid | one SDF volume per bowl (2.5 mm voxels, 60×56×60), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest |
+| Solid | one SDF volume per bowl (2.5 mm voxels, 60×60×60), one for the table around the bowls (72 × 5 × 40 cm, 288×20×160), plus one SDF that rides on the spoon (1.6 mm) | ice cream at rest, in a bowl or on the table |
 | Loose | PBF particles (Position Based Fluids + cohesion + XSPH viscosity + static friction); a released scoop is one shape-matched **lump** | crumbs pushed off by the spoon, a scoop sliding off a tilted spoon |
 
 - **Scooping**: the spoon's metal cuts the bowl SDF. Ice inside the cup is **copied** into the spoon's SDF,
   so pressing in and lifting gives a scoop. Ice already on the spoon picks up more ice in the direction of
   travel (accretion), which gives the curl. Ice pushed aside by the metal becomes particles.
 - **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
-  into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`).
+  into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`). That
+  works anywhere there is a grid: in a bowl, or **on the table** (Claybook's whole world is one SDF; here
+  the table around the bowls has its own grid), so dropped ice cream becomes solid ice on the table that
+  particles land on and the spoon can scoop again. Only beyond the table grid does a particle become a
+  static crumb. Stamps hold a little more than a particle; in a bowl the ledger shaves the difference off
+  the heap, on the table the table's own ice gives it back through its next volume-preserving smoothing.
 - **Surface tension**: the edited voxels get a **volume-preserving** Laplacian smoothing pass. On the spoon
   it keeps "settling" for 30 frames, so a scoop rounds into a ball without losing mass; while the scoop
   changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
@@ -79,7 +84,10 @@ Ice cream exists in two forms that convert into each other:
   the rotation and translation that best map the lump's rest shape onto its particles and pulls them
   `lump stiffness` of the way back; a particle pushed more than `lump yield` from its place moves its place
   (plastic flow), so the scoop squashes a little when it lands instead of bouncing back. A dropped scoop
-  falls as a ball and lands as a mound; on a level spoon it stays in the cup. Crumbs stay fluid.
+  falls as a ball and lands as a mound; on a level spoon it stays in the cup. Once a lump has touched the
+  bowls, the table or their ice for 6 frames it freezes whole, in the shape it landed in (Claybook's
+  `DieWhenHitGround`, for a lump): a rigid fit pressed onto a flat table creeps instead of coming to rest.
+  Crumbs stay fluid.
 - **Rendering**: each SDF is a 3D texture (r8 distance + rgba8 colour / speck amount). A fragment shader
   sphere-traces it inside a proxy box and writes `frag_depth`, so it occludes meshes correctly. The same
   shader renders into the shadow map. The ice cream is **matte frozen foam**: sub-millimetre relief from
@@ -124,6 +132,7 @@ uses the previous frame's carving.
   | straight down into each bowl, held, lifted | held: no gain; lifted out 17.4 / 5.2 / 12.6 g (CPU 14.6 / 4.5 / 14.8 g) |
   | tip-out | scoop gone, ~1,350 particles, frozen back 4 s later, drift 0.01 g |
   | a scoop released on a level spoon | stays in the cup as one lump (10.5 → 10.4 mm tall after 20 frames) |
+  | a scoop dropped on the table | freezes into the table grid (GPU 12.2 g of 14.7, 4 crumbs), scraped back up 2.7 g (CPU 2.4) |
   | three plunges into the same hole + eat | 31.4 g eaten, drift 0.01 g |
   | the SO-101 carrying a GPU scoop | ~12 g, arm within 0.33 mm of the spoon |
   | two identical runs | bit-identical |
@@ -215,11 +224,11 @@ commands a controller sends (`rust/cli/src/ui.rs`). **View** is drawing only:
   the grid and the dispatch sizes are worked out on the GPU (indirect dispatch), nothing is read back.
   `balls`, `both` or `hidden` instead. The surface's radius, blend kernel, voxel size and smoothing are
   sliders (× particle radius).
-- **Show**: crumbs, ice cream in the bowls and on the spoon, bowls, spoon, SO-101, table, target ghost,
+- **Show**: crumbs, ice cream in the bowls (and on the table) and on the spoon, bowls, spoon, SO-101, table, target ghost,
   shadows.
 - **Debug**: shading (`normals`, `albedo (unlit)`, `march steps` heat map), matte or the older glossy ice
   cream, a blue tint on the particle surface, and translucent boxes for each SDF grid (orange: bowls,
-  green: spoon).
+  green: spoon, purple: table).
 
 ## Digital-twin interface
 
@@ -241,7 +250,7 @@ flavours, arm links; and the parameters). Then:
 - **State stream**: `config {stream: "state", frame, rateHz}` sends `state` JSON at `rateHz`.
 
 `state` holds the actual and target pose, velocity, contact, blocked, cutForceN, scoopedGrams, eatenGrams,
-grams left per bowl, particles, and `arm` (joints in rad and deg, goal pose, goalUnreachableMm/Deg,
+grams left per bowl, grams frozen on the table (`tableGrams`), particles, and `arm` (joints in rad and deg, goal pose, goalUnreachableMm/Deg,
 trackingErrorMm/Deg, base).
 
 Example controller: `just ws-example` (`tools/ws_example_client.py`) asks for a ROS-frame state stream and
@@ -318,6 +327,10 @@ tools/                 WebSocket example controller, SO-101 asset conversion
 - Joint angles follow the URDF convention (radians, zero at the URDF's zero pose). `so101_new_calib` is meant
   to line up with LeRobot's calibration, but check each joint's zero and direction on the real arm before
   streaming angles to it.
+- What scoops is the cup's opening moving into ice (lifting, or pushing opening first); moving the cup's
+  bottom first only cuts. A low pile on the table is therefore hard to pick up (tilt the spoon to ~80°,
+  rim along the table, opening toward the pile): about 1–3 g of a 15 g pile per pass; a taller lump scoops
+  like a bowl.
 - Ice cream doesn't stop the spoon, only slows it down (the cutting force is estimated from hardness × swept
   area, not real mechanics).
 - Solid ice cream doesn't slowly sag once frozen.

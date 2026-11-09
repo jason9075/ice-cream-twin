@@ -4,6 +4,7 @@
 
 use crate::engine::Engine;
 use icecream_core::grid::SdfGrid;
+use icecream_core::sim::TABLE;
 use icecream_gpu::layout::{CAP, MAX_SPILLED};
 use icecream_gpu::wgpu;
 use icecream_view::{FrameState, GridGeo, Renderer, SceneDesc};
@@ -12,7 +13,7 @@ pub fn scene_desc(t: &dyn Engine) -> SceneDesc {
     let s = t.sim();
     let geo = |g: &SdfGrid| GridGeo { origin: [g.ox, g.oy, g.oz], cell: g.cell, dims: [g.nx, g.ny, g.nz], band: g.band };
     SceneDesc {
-        grids: [geo(&s.grids[0]), geo(&s.grids[1]), geo(&s.grids[2]), geo(&s.content)],
+        grids: [geo(&s.grids[0]), geo(&s.grids[1]), geo(&s.grids[2]), geo(&s.content), geo(&s.grids[TABLE])],
         particle_cap: CAP,
         crumb_cap: MAX_SPILLED,
         hide_jaw: t.arm().tool.hide_jaw,

@@ -34,7 +34,7 @@ async fn a_controller_scoops_and_eats() {
     let hello = next_text(&mut ws).await;
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["paused"], true);
-    assert_eq!(hello["scene"]["grids"].as_array().unwrap().len(), 4);
+    assert_eq!(hello["scene"]["grids"].as_array().unwrap().len(), 5); // three bowls, the scoop, the table
     assert_eq!(hello["scene"]["arm"]["links"].as_array().unwrap().len(), 8);
     assert_eq!(hello["params"]["fluid"]["maxParticles"], 5000);
 

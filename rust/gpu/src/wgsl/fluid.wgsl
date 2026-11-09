@@ -226,14 +226,18 @@ fn applyCollide(@builtin(global_invocation_id) id: vec3u) {
       nrm = g;
     }
   }
-  d = gsample(bi, p) - r;
-  if (d < 0.0) {
-    let g = ggrad(bi, p);
-    p -= d * g;
-    if (-d >= best) {
-      best = -d;
-      ty = 1u;
-      nrm = g;
+  // the bowl's ice, then ice frozen on the table
+  for (var k = 0u; k < 2u; k++) {
+    let gi = select(TABLE_G, bi, k == 0u);
+    d = gsample(gi, p) - r;
+    if (d < 0.0) {
+      let g = ggrad(gi, p);
+      p -= d * g;
+      if (-d >= best) {
+        best = -d;
+        ty = 1u;
+        nrm = g;
+      }
     }
   }
 

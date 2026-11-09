@@ -3,6 +3,7 @@
 
 use icecream_core::math::{Quat, Vec3};
 use icecream_core::robot::Arm;
+use icecream_core::sim::TABLE;
 use icecream_core::{Params, Sim, State, Twin};
 use icecream_gpu::{wgpu, GpuSim, GpuTwin};
 use std::sync::Arc;
@@ -112,10 +113,14 @@ impl Engine for Twin {
     }
     fn view(&mut self) -> View<'_> {
         let s = &mut self.sim;
-        // renderer order: the bowls, the scoop
-        let mut changed = [(false, false); 4];
+        // renderer order: the bowls, the scoop, the table
+        let mut changed = [(false, false); 5];
         for (k, c) in changed.iter_mut().enumerate() {
-            let g = if k < 3 { &mut s.grids[k] } else { &mut s.content };
+            let g = match k {
+                0..=2 => &mut s.grids[k],
+                3 => &mut s.content,
+                _ => &mut s.grids[TABLE],
+            };
             if g.dirty {
                 g.pack();
                 g.dirty = false;
@@ -129,9 +134,13 @@ impl Engine for Twin {
         let particles = particle_bytes(&s.fluid.pos, &s.fluid.rgba, s.fluid.n);
         let spilled = particle_bytes(&s.spilled, &s.spilled_rgba, s.n_spilled);
         let s = &self.sim;
-        let grids = (0..4)
+        let grids = (0..5)
             .map(|k| {
-                let g = if k < 3 { &s.grids[k] } else { &s.content };
+                let g = match k {
+                    0..=2 => &s.grids[k],
+                    3 => &s.content,
+                    _ => &s.grids[TABLE],
+                };
                 GridView { dims: [g.nx, g.ny, g.nz], dist: &g.bytes, color: &g.color, dist_changed: changed[k].0, color_changed: changed[k].1 }
             })
             .collect();

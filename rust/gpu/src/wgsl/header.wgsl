@@ -150,10 +150,11 @@ fn sdBowl(b: u32, p: vec3f) -> f32 {
   return d - BOWL_T;
 }
 fn sdEnv(p: vec3f) -> f32 { return min(p.y, sdBowl(nearestBowl(p.x), p)); }
-/** Bowl grid holding p, or 99u (Sim.gridAt). */
+/** World grid holding p: its bowl's, else the table's (TABLE_G), else 99u (Sim.gridAt). */
 fn gridAt(p: vec3f) -> u32 {
   let b = nearestBowl(p.x);
-  return select(99u, b, gcontains(b, p, 0.0));
+  if (gcontains(b, p, 0.0)) { return b; }
+  return select(99u, TABLE_G, gcontains(TABLE_G, p, 0.0));
 }
 fn sdEllipsoid(p: vec3f, r: vec3f) -> f32 {
   let k0 = length(p / r);
@@ -262,6 +263,8 @@ fn wgMaxI(t: u32, v: i32) -> i32 {
 /** Owe vol m³ at world point p of bowl grid g: into the fixed-point bin there (atomic). */
 fn oweBin(g: u32, p: vec3f, vol: f32) {
   if (vol <= 0.0) { return; }
+  // the table has no bowl to pile into: its own ice makes up for it (folded into S_tableOwed)
+  if (g == TABLE_G) { atomicAdd(&A[A_TABLEOWE], u32(round(vol / VOL_UNIT))); return; }
   let bn = GBINS[g];
   let c = clamp(vec3i(floor((p - GO[g].xyz) / (GO[g].w * f32(BIN)))), vec3i(0), vec3i(bn.xyz) - 1);
   let b = bn.w + u32(c.x) + bn.x * (u32(c.y) + bn.y * u32(c.z));

@@ -8,7 +8,8 @@
 //! With `stream` on, a second small submission packs what changed for the viewer (grids that were
 //! edited, particles, crumbs) and reads it back.
 
-use crate::layout::{cnt, entry_points, pack_row_words, shader, st, stu, Layout, CAP, MAX_SPILLED, NG, PASS_BYTES};
+use crate::layout::{cnt, entry_points, pack_row_words, shader, st, stu, Layout, CAP, MAX_SPILLED, NG, PASS_BYTES, TABLE_G};
+use icecream_core::sim::TABLE as TABLE_GRID;
 use icecream_core::fluid::MAX_LUMPS;
 use icecream_core::math::{Quat, Vec3};
 use icecream_core::params::Params;
@@ -364,9 +365,13 @@ impl GpuSim {
         self.queue.write_buffer(&self.x, (self.l.x.get("FLAG") as u64 + off) * 4, &vec![0u8; g.n * 4]);
     }
 
-    /// The CPU simulation's grid behind GPU grid `k` (the bowls, the scoop).
+    /// The CPU simulation's grid behind GPU grid `k` (the bowls, the scoop, the table).
     fn cpu_grid(&self, k: usize) -> &icecream_core::grid::SdfGrid {
-        if k < 3 { &self.cpu.grids[k] } else { &self.cpu.content }
+        match k {
+            0..=2 => &self.cpu.grids[k],
+            3 => &self.cpu.content,
+            _ => &self.cpu.grids[TABLE_GRID],
+        }
     }
 
     /// Back to the start: the CPU simulation's initial ice, an empty spoon, no particles.
@@ -398,6 +403,7 @@ impl GpuSim {
         for k in 0..3 {
             self.stats.volume[k] = self.cpu.grids[k].volume();
         }
+        self.stats.volume[TABLE_G as usize] = self.cpu.grids[TABLE_GRID].volume();
         self.particles.clear();
         self.spilled.clear();
         self.spilled_version += 1;
@@ -550,7 +556,9 @@ impl GpuSim {
             let g = &gb[k];
             !(b[3] < g[0] || b[0] > g[3] || b[4] < g[1] || b[1] > g[4] || b[5] < g[2] || b[2] > g[5])
         };
-        let touching: Vec<usize> = (0..3).filter(|&k| hits(&hb, k) || hits(&hb_handle, k)).collect();
+        // CPU grid indices (the bowls, the table); the passes take the GPU's
+        let touching: Vec<usize> = (0..=TABLE_GRID).filter(|&k| hits(&hb, k) || hits(&hb_handle, k)).collect();
+        let gpu_of = |k: usize| if k == TABLE_GRID { TABLE_G as i32 } else { k as i32 };
         if touching.is_empty() {
             return;
         }
@@ -586,7 +594,7 @@ impl GpuSim {
                     continue;
                 }
                 let rn = (s[0] * s[1] * s[2]) as u32;
-                let p = Pass { i0: [k as i32, i0, j0, k0], i1: [s[0], s[1], s[2], i32::from(handle_only) | (i32::from(tilted) << 1)], ..base };
+                let p = Pass { i0: [gpu_of(k), i0, j0, k0], i1: [s[0], s[1], s[2], i32::from(handle_only) | (i32::from(tilted) << 1)], ..base };
                 self.run(fr, "carveMark", rn.div_ceil(256), p);
                 self.scan(fr, false, self.l.w.get("DVD"), self.l.w.get("PD"), rn);
                 self.scan(fr, false, self.l.w.get("DVC"), self.l.w.get("PC"), rn);
@@ -594,7 +602,7 @@ impl GpuSim {
                 self.run(fr, "carveDone", 1, p);
             }
         }
-        self.run(fr, "interactDone", 1, Pass::i([touching[0] as i32, 0, 0, 0]));
+        self.run(fr, "interactDone", 1, Pass::i([gpu_of(touching[0]), 0, 0, 0]));
     }
 
     fn release_passes(&self, fr: &mut Frame) {
@@ -781,6 +789,8 @@ impl GpuSim {
         }
         // 5. freeze resting particles into the SDFs
         let cap_groups = CAP.div_ceil(WG);
+        self.particles(&mut fr, "lumpTouch", Pass::default());
+        self.run(&mut fr, "lumpLand", 1, Pass::default());
         self.run(&mut fr, "freezeMark", cap_groups, Pass::default());
         self.scan(&mut fr, true, self.l.x.get("SCANU"), self.l.x.get("IDX"), CAP);
         self.run(&mut fr, "freezeList", cap_groups, Pass::default());
@@ -794,7 +804,7 @@ impl GpuSim {
         // 7. surface tension: volume-preserving smoothing of what was edited, then settling
         let sm = self.cpu.params.ice.smoothing;
         let bsm = self.cpu.params.ice.bowl_smoothing;
-        for k in 0..3 {
+        for k in [0, 1, 2, TABLE_G as usize] {
             self.smooth(&mut fr, k, 0, bsm);
             // settling smooths the whole recently edited box for 30 frames: that would round the cuts off
             // again, so only with smooth_cuts
@@ -1010,7 +1020,7 @@ impl GpuSim {
     /// Everything accounted for (g): ice in bowls and on the spoon, loose, owed, eaten, spilled.
     pub fn total_grams(&self) -> f64 {
         let s = &self.stats;
-        let vol = s.volume[0] + s.volume[1] + s.volume[2] + s.content_vol + s.n as f64 * self.particle_volume() + s.debt_vol + s.eaten_vol + s.spilled_vol;
+        let vol = s.volume[0] + s.volume[1] + s.volume[2] + s.volume[TABLE_G as usize] + s.content_vol + s.n as f64 * self.particle_volume() + s.debt_vol + s.eaten_vol + s.spilled_vol;
         self.grams(vol)
     }
 
@@ -1037,6 +1047,7 @@ impl GpuSim {
             eaten_grams: self.grams(s.eaten_vol),
             spilled_grams: self.grams(s.spilled_vol),
             bowl_grams: [0, 1, 2].map(|k| self.grams(s.volume[k])),
+            table_grams: self.grams(s.volume[TABLE_G as usize]),
             particles: s.n as usize,
         }
     }

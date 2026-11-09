@@ -43,6 +43,9 @@ pub struct SdfGrid {
     pub sz: f64,
     pub residual: f64,
     pub residual_idx: usize,
+    /// m³ the next volume-preserving write should add (negative: take off) on top of keeping the volume;
+    /// what it can't goes to `residual`
+    pub volume_adjust: f64,
     pub settle_frames: u32,
     settle_box: [i64; 6],
     ud: Vec<f32>,
@@ -77,6 +80,7 @@ impl SdfGrid {
             sy: dims[1] as f64 * cell,
             sz: dims[2] as f64 * cell,
             residual: 0.0,
+            volume_adjust: 0.0,
             residual_idx: 0,
             settle_frames: 0,
             settle_box: [0; 6],
@@ -216,6 +220,7 @@ impl SdfGrid {
         for q in 0..n {
             vb += self.occ(self.data[self.touched_list[q]] as f64);
         }
+        vb += std::mem::take(&mut self.volume_adjust) / (c * c * c);
         let mut lo = -c;
         let mut hi = c;
         let mut shift = 0.0f64;

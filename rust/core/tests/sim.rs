@@ -101,3 +101,49 @@ fn ros_frame_roundtrip() {
         assert!((back[k] - q[k]).abs() < 1e-12);
     }
 }
+
+/// A scoop dropped on the table freezes into the table's SDF (not static crumbs), keeps the mass, and the
+/// spoon can scoop it back up.
+#[test]
+fn a_scoop_dropped_on_the_table_freezes_there_and_can_be_scooped_again() {
+    let mut sim = Sim::default();
+    sim.update_stats(true);
+    let before = sim.total_grams();
+    let b = &bowls()[2];
+    let level = Quat::IDENTITY;
+    run_to(&mut sim, Vec3::new(b.cx, 0.14, 0.0), level, 60);
+    run_to(&mut sim, Vec3::new(b.cx, 0.085, 0.0), level, 150);
+    run_to(&mut sim, Vec3::new(b.cx, 0.15, 0.0), level, 120);
+    let scooped = sim.state().scooped_grams;
+    // over the table in front of the mint bowl, outside its grid, then tip it out
+    let spot = Vec3::new(0.27, 0.12, 0.12);
+    run_to(&mut sim, spot, level, 90);
+    run_to(&mut sim, spot, Quat::from_euler(PI * 0.9, 0.0, 0.0), 120);
+    sim.step_frames(240);
+    sim.update_stats(true);
+    let st = sim.state();
+    println!("dropped {scooped:.1} g: {:.1} g frozen on the table, {} static crumbs, {} loose", st.table_grams, sim.n_spilled, sim.fluid.n);
+    assert!(scooped > 3.0);
+    assert!(st.table_grams > 0.6 * scooped, "only {:.1} of {scooped:.1} g froze onto the table", st.table_grams);
+    assert!(sim.n_spilled < 20, "{} static crumbs", sim.n_spilled);
+    assert!((sim.total_grams() - before).abs() < 0.1, "mass {before:.2} -> {:.2} g", sim.total_grams());
+
+    // scoop it back up
+    sim.eat();
+    // opening first is what scoops (moving the cup bottom first only cuts): opening toward -x, handle up,
+    // pushed through the pile from its +x side, then lifted level
+    let scrape = Quat::from_euler(0.0, 0.0, 1.45);
+    for (p, q, n) in [
+        (Vec3::new(0.34, 0.09, 0.13), scrape, 120),
+        (Vec3::new(0.34, 0.022, 0.13), scrape, 90),
+        (Vec3::new(0.22, 0.022, 0.13), scrape, 180),
+        (Vec3::new(0.22, 0.09, 0.13), level, 120),
+    ] {
+        run_to(&mut sim, p, q, n);
+    }
+    let again = sim.state().scooped_grams;
+    sim.update_stats(true);
+    println!("scooped {again:.1} g off the table, {:.1} g left there", sim.state().table_grams);
+    assert!(again > 1.0, "scooped {again:.2} g off the table");
+    assert!((sim.total_grams() - before).abs() < 0.1, "mass {before:.2} -> {:.2} g", sim.total_grams());
+}

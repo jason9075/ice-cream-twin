@@ -2,7 +2,7 @@
 //! SDF, loose PBF particles that freeze back into solid ice, and a volume ledger that keeps
 //! the total mass constant. Ported from the JS version this project started with (removed; `tests/parity.rs` pins the port to frozen fixtures from it).
 
-use crate::fluid::{Collide, Fluid, CONTACT_NONE, CONTACT_SPOON, CONTACT_WORLD};
+use crate::fluid::{Collide, Fluid, CONTACT_NONE, CONTACT_SPOON, CONTACT_WORLD, MAX_LUMPS};
 use crate::grid::SdfGrid;
 use crate::math::{acos, cbrt, cos, hypot2, hypot3, js_round, pow, rad_to_deg, sin, Pose, Quat, Vec3};
 use crate::params::{FillShape, Params};
@@ -20,6 +20,13 @@ const CONTENT_ORIGIN: [f64; 3] = [-0.032, -0.014, -0.022];
 const CONTENT_CELL: f64 = 0.0016;
 const CONTENT_DIMS: [usize; 3] = [40, 25, 28];
 const MAX_SPILLED: usize = 8000;
+/// The table around the bowls is an SDF volume too (Claybook: the whole world is one): ice that comes to
+/// rest on it freezes into it, stays solid, is collided with and can be scooped back up. `grids[TABLE]`.
+pub const TABLE: usize = 3;
+/// frames a lump touches the world before it freezes whole
+const LUMP_LANDING_FRAMES: u32 = 6;
+const TABLE_ORIGIN: [f64; 3] = [-0.36, -0.006, -0.2];
+const TABLE_DIMS: [usize; 3] = [288, 20, 160];
 /// re-deposit stamps per frame (keeps the frame time bounded)
 const DEBT_STAMPS_PER_FRAME: u32 = 48;
 const DEBT_MAX_ENTRIES: usize = 256;
@@ -96,13 +103,18 @@ pub struct State {
     pub eaten_grams: f64,
     pub spilled_grams: f64,
     pub bowl_grams: [f64; 3],
+    /// frozen onto the table
+    pub table_grams: f64,
     pub particles: usize,
 }
 
+/// The world grid holding a point: its bowl's when inside that box, else the table's (else none).
 fn grid_at(grids: &[SdfGrid], x: f64, y: f64, z: f64) -> Option<usize> {
     let i = nearest_bowl(x).index;
     if grids[i].contains(x, y, z, 0.0) {
         Some(i)
+    } else if grids.len() > TABLE && grids[TABLE].contains(x, y, z, 0.0) {
+        Some(TABLE)
     } else {
         None
     }
@@ -151,6 +163,12 @@ pub struct Sim {
     pub spilled_volume: f64,
     pub content_volume: f64,
     pub bowl_volumes: [f64; 3],
+    pub table_volume: f64,
+    /// m³ the table still owes (stamps add more than a particle holds): taken off the ice there by its
+    /// next volume-preserving smoothing
+    pub table_owed: f64,
+    /// per lump: frames it has been touching the bowls, the table or their ice
+    lump_landed: [u32; MAX_LUMPS + 1],
     releasing: bool,
     debts: Vec<Debt>,
     credit: Vec<(GridId, f64)>,
@@ -185,7 +203,8 @@ impl Sim {
             flavor_rgba(FLAVORS[1].color, FLAVORS[1].speck),
             flavor_rgba(FLAVORS[2].color, FLAVORS[2].speck),
         ];
-        let grids = bowls().iter().map(|b| SdfGrid::new([b.cx - 0.075, -0.006, b.cz - 0.075], WORLD_CELL, WORLD_DIMS, 4.0)).collect();
+        let mut grids: Vec<SdfGrid> = bowls().iter().map(|b| SdfGrid::new([b.cx - 0.075, -0.006, b.cz - 0.075], WORLD_CELL, WORLD_DIMS, 4.0)).collect();
+        grids.push(SdfGrid::new(TABLE_ORIGIN, WORLD_CELL, TABLE_DIMS, 4.0));
         let spoon = SpoonController::new(params.spoon.clone());
         let fluid = Fluid::new(16000);
         let cap = fluid.cap;
@@ -209,6 +228,9 @@ impl Sim {
             spilled_volume: 0.0,
             content_volume: 0.0,
             bowl_volumes: [0.0; 3],
+            table_volume: 0.0,
+            table_owed: 0.0,
+            lump_landed: [0; MAX_LUMPS + 1],
             releasing: false,
             debts: Vec::new(),
             credit: Vec::new(),
@@ -241,6 +263,8 @@ impl Sim {
         self.cut_force = 0.0;
         self.eaten_volume = 0.0;
         self.spilled_volume = 0.0;
+        self.table_owed = 0.0;
+        self.lump_landed = [0; MAX_LUMPS + 1];
         self.n_spilled = 0;
         self.spilled_version = 0;
         self.releasing = false;
@@ -258,6 +282,10 @@ impl Sim {
         for i in 0..3 {
             self.init_bowl(i, shape);
         }
+        self.grids[TABLE].clear();
+        self.grids[TABLE].fill_color(self.flavor_rgba[0]);
+        self.grids[TABLE].dirty = true;
+        self.grids[TABLE].color_dirty = true;
         self.last_carve_pos = self.spoon.pos;
         self.last_carve_quat = self.spoon.quat;
         self.update_stats(true);
@@ -421,7 +449,10 @@ impl Sim {
         let sm = self.params.ice.smoothing;
         let bsm = self.params.ice.bowl_smoothing;
         let tilted_now = tilt > release;
-        for i in 0..3 {
+        for i in 0..=TABLE {
+            if i == TABLE && self.grids[TABLE].n_touched > 0 && bsm > 0.0 {
+                self.grids[TABLE].volume_adjust = std::mem::take(&mut self.table_owed);
+            }
             let g = &self.grids[i];
             {
                 let keep_out = spoon_keep_out(self.pose, &self.content, tilted_now, [g.ox, g.oy, g.oz, g.cell], [g.nx, g.ny], g.band);
@@ -489,7 +520,7 @@ impl Sim {
         let hb_handle = local_box_to_world(&pose, [hdl[0][0] - 0.004, ymin - 0.004, -0.004], [hdl[3][0] + 0.004, ymax + 0.004, 0.004]);
 
         let touching: Vec<usize> =
-            (0..3).filter(|&i| box_hits_grid(&hb, &self.grids[i]) || box_hits_grid(&hb_handle, &self.grids[i])).collect();
+            (0..=TABLE).filter(|&i| box_hits_grid(&hb, &self.grids[i]) || box_hits_grid(&hb_handle, &self.grids[i])).collect();
         if touching.is_empty() {
             return;
         }
@@ -753,6 +784,11 @@ impl Sim {
 
     /// Record a debt at (x, y, z) in grid `g`'s coordinates (spoon-local for the content grid).
     fn owe(&mut self, mut g: GridId, mut x: f64, mut y: f64, mut z: f64, mut vol: f64, rgba: [u8; 4]) {
+        if g == GridId::Bowl(TABLE) {
+            // no bowl to pile it into: the table's own ice makes up for it (next smoothing there)
+            self.table_owed += vol;
+            return;
+        }
         if g == GridId::Content {
             // never pile owed ice onto the scoop: hand it to the bowl under the spoon, or let it
             // fall as loose particles
@@ -869,6 +905,10 @@ impl Sim {
 
     /// Signed balance: positive = still owed, negative = a stamp added more than it should.
     fn settle(&mut self, mut g: GridId, x: f64, y: f64, z: f64, vol: f64, rgba: [u8; 4]) {
+        if g == GridId::Bowl(TABLE) {
+            self.table_owed += vol;
+            return;
+        }
         if g == GridId::Content && vol < 0.0 {
             // extra ice on the scoop: the bowl under the spoon gives up that much instead
             let (_, bowl) = self.content_to_bowl(x, y, z);
@@ -1188,6 +1228,19 @@ impl Sim {
         let fp = self.params.fluid.clone();
         let rs = fp.stamp_scale * self.fluid.r;
         let vp = self.particle_volume();
+        // a lump that has landed (touched the bowls, the table or their ice for a few frames) freezes
+        // whole, in the shape it landed in: a rigid fit pressed on a flat table creeps instead of resting
+        let mut touching = [false; MAX_LUMPS + 1];
+        for i in 0..self.fluid.n {
+            if self.fluid.contact[i] == CONTACT_WORLD {
+                touching[self.fluid.lump[i] as usize] = true;
+            }
+        }
+        let mut landed = [false; MAX_LUMPS + 1];
+        for l in 1..=MAX_LUMPS {
+            self.lump_landed[l] = if touching[l] { self.lump_landed[l] + 1 } else { 0 };
+            landed[l] = self.lump_landed[l] >= LUMP_LANDING_FRAMES;
+        }
         let mut i = self.fluid.n;
         while i > 0 {
             i -= 1;
@@ -1210,7 +1263,8 @@ impl Sim {
             }
             let f = &mut self.fluid;
             let ty = f.contact[i];
-            if ty == CONTACT_NONE {
+            let lump_landed = landed[f.lump[i] as usize];
+            if ty == CONTACT_NONE && !lump_landed {
                 f.rest[i] = 0;
                 continue;
             }
@@ -1225,7 +1279,8 @@ impl Sim {
             let slow = f.slow[i] as f64;
             let rest = f.rest[i];
             let embedded = slow < 3.0 * fp.stop_speed && self.embedded(ty, x, y, z);
-            if (rest as u32) < fp.rest_frames && !instant && !embedded {
+            let landed = lump_landed && ty != CONTACT_SPOON;
+            if (rest as u32) < fp.rest_frames && !instant && !embedded && !landed {
                 continue;
             }
             col.copy_from_slice(&self.fluid.rgba[i * 4..i * 4 + 4]);
@@ -1254,7 +1309,7 @@ impl Sim {
                     self.remove_particle(i);
                 }
                 _ => {
-                    // on the table, outside every bowl volume: keep it as a static crumb
+                    // outside every SDF volume (the far end of the table): keep it as a static crumb
                     if self.n_spilled < MAX_SPILLED {
                         let s = self.n_spilled;
                         self.n_spilled += 1;
@@ -1385,6 +1440,7 @@ impl Sim {
             for i in 0..3 {
                 self.bowl_volumes[i] = self.grids[i].volume();
             }
+            self.table_volume = self.grids[TABLE].volume();
         }
     }
 
@@ -1396,7 +1452,7 @@ impl Sim {
     pub fn total_grams(&self) -> f64 {
         let bowls: f64 = self.grids.iter().map(|g| g.volume()).sum();
         self.grams(
-            bowls + self.content.volume() + self.fluid.n as f64 * self.particle_volume() + self.eaten_volume + self.spilled_volume + self.debt_volume(),
+            bowls + self.content.volume() + self.fluid.n as f64 * self.particle_volume() + self.eaten_volume + self.spilled_volume + self.table_owed + self.debt_volume(),
         )
     }
 
@@ -1422,6 +1478,7 @@ impl Sim {
             eaten_grams: self.grams(self.eaten_volume),
             spilled_grams: self.grams(self.spilled_volume),
             bowl_grams: [self.grams(self.bowl_volumes[0]), self.grams(self.bowl_volumes[1]), self.grams(self.bowl_volumes[2])],
+            table_grams: self.grams(self.table_volume),
             particles: self.fluid.n,
         }
     }
@@ -1476,19 +1533,22 @@ impl Collide for Env<'_> {
                 nz = gz;
             }
         }
-        let g = &self.grids[b.index];
-        d = g.sample(x, y, z) - r;
-        if d < 0.0 {
-            let n = g.grad(x, y, z);
-            x -= d * n[0];
-            y -= d * n[1];
-            z -= d * n[2];
-            if -d >= best {
-                best = -d;
-                ty = CONTACT_WORLD;
-                nx = n[0];
-                ny = n[1];
-                nz = n[2];
+        // the bowl's ice, then ice frozen on the table
+        for gi in [b.index, TABLE] {
+            let g = &self.grids[gi];
+            d = g.sample(x, y, z) - r;
+            if d < 0.0 {
+                let n = g.grad(x, y, z);
+                x -= d * n[0];
+                y -= d * n[1];
+                z -= d * n[2];
+                if -d >= best {
+                    best = -d;
+                    ty = CONTACT_WORLD;
+                    nx = n[0];
+                    ny = n[1];
+                    nz = n[2];
+                }
             }
         }
 

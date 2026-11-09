@@ -129,6 +129,9 @@ fn ledgerBins(@builtin(local_invocation_id) lid: vec3u) {
     W[W_ST + S_negSettle + g] = 0.0;
     if (ex > 0.0) { extraIce(g, ex); }
   }
+  // the table's balance: owed minus extra (taken off or added to its ice by its next smoothing)
+  W[W_ST + S_tableOwed] += f32(atomicExchange(&A[A_TABLEOWE], 0u)) * VOL_UNIT - W[W_ST + S_negSettle + TABLE_G];
+  W[W_ST + S_negSettle + TABLE_G] = 0.0;
   // owed ice with nowhere to go on the spoon falls as loose particles (Sim._owe, content branch)
   let vp = G.g6.x;
   var n = nParticles();
@@ -371,8 +374,9 @@ fn ledgerStats(@builtin(local_invocation_id) lid: vec3u) {
   for (var e = t; e < nDebts(); e += 256u) { s += dVol(e); }
   let tot = wgSum(t, s);
   if (t == 0u) {
-    var v = tot + W[W_ST + S_looseOwed];
-    for (var g = 0u; g < 4u; g++) { v -= W[W_ST + S_credit + g] + W[W_ST + S_negSettle + g]; }
+    var v = tot + W[W_ST + S_looseOwed] + W[W_ST + S_tableOwed] + f32(atomicLoad(&A[A_TABLEOWE])) * VOL_UNIT;
+    for (var g = 0u; g < 4u; g++) { v -= W[W_ST + S_credit + g]; }
+    for (var g = 0u; g < NG; g++) { v -= W[W_ST + S_negSettle + g]; }
     W[W_ST + S_debtVol] = v;
   }
 }

@@ -97,7 +97,7 @@ pub fn state_json_kind(s: &State, arm: Option<&ArmState>, f: Frame, kind: &str) 
         "contact": s.contact, "contactSamples": s.contact_samples, "blocked": s.blocked,
         "speedScale": s.speed_scale, "cutForceN": s.cut_force_n,
         "scoopedGrams": s.scooped_grams, "eatenGrams": s.eaten_grams, "spilledGrams": s.spilled_grams,
-        "bowlGrams": bowl_grams, "particles": s.particles,
+        "bowlGrams": bowl_grams, "tableGrams": s.table_grams, "particles": s.particles,
         "arm": arm.map(|a| arm_json(a, f)),
         "simulation": kind,
     })
@@ -198,7 +198,7 @@ pub fn scene_json(t: &dyn Engine) -> Value {
         json!({ "origin": [g.ox, g.oy, g.oz], "cell": g.cell, "dims": [g.nx, g.ny, g.nz], "band": g.band })
     };
     json!({
-        "grids": s.grids.iter().map(grid).chain(std::iter::once(grid(&s.content))).collect::<Vec<_>>(),
+        "grids": s.grids[..3].iter().chain([&s.content, &s.grids[icecream_core::sim::TABLE]]).map(grid).collect::<Vec<_>>(),
         "bowls": bowls().iter().map(|b| json!({ "cx": b.cx, "cz": b.cz, "profile": bowl_profile(b, 48) })).collect::<Vec<_>>(),
         "spoon": { "a": SPOON.a, "b": SPOON.b, "c": SPOON.c, "t": SPOON.t, "handleR": SPOON.handle_r, "handle": SPOON.handle },
         "flavors": FLAVORS.iter().map(|f| json!({ "id": f.id, "label": f.label, "color": format!("#{:06x}", f.color), "speck": f.speck })).collect::<Vec<_>>(),

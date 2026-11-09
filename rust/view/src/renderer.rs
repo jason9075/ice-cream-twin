@@ -28,11 +28,11 @@ pub struct GridGeo {
     pub band: f64,
 }
 
-/// SDF grids: the three bowls, the scoop (spoon-local).
-pub const GRIDS: usize = 4;
+/// SDF grids: the three bowls, the scoop (spoon-local), the table.
+pub const GRIDS: usize = 5;
 
 pub struct SceneDesc {
-    /// the three bowls, the scoop (spoon-local)
+    /// the three bowls, the scoop (spoon-local), the table
     pub grids: [GridGeo; GRIDS],
     pub particle_cap: u32,
     pub crumb_cap: u32,
@@ -521,10 +521,14 @@ impl Renderer {
         let sc = [(c.dims[0] as f64 * c.cell) as f32, (c.dims[1] as f64 * c.cell) as f32, (c.dims[2] as f64 * c.cell) as f32];
         let content_box = self.mesh(&geometry::cuboid([0.0; 3], sc));
         self.volume(&c, content_box);
+        let t = desc.grids[4];
+        let st = [(t.dims[0] as f64 * t.cell) as f32, (t.dims[1] as f64 * t.cell) as f32, (t.dims[2] as f64 * t.cell) as f32];
+        let table_box = self.mesh(&geometry::cuboid([0.0; 3], st));
+        self.volume(&t, table_box);
 
         // translucent boxes showing what each SDF grid covers (debug)
         let unit = self.mesh(&geometry::cuboid([0.0; 3], [1.0; 3]));
-        let colors = [[1.0, 0.6, 0.2], [1.0, 0.6, 0.2], [1.0, 0.6, 0.2], [0.3, 0.9, 0.3]];
+        let colors = [[1.0, 0.6, 0.2], [1.0, 0.6, 0.2], [1.0, 0.6, 0.2], [0.3, 0.9, 0.3], [0.7, 0.4, 1.0]];
         for (k, col) in colors.iter().enumerate() {
             let o = self.object(unit, *col, 0.0, 1.0, 0.15, 0.0);
             let g = desc.grids[k];
@@ -646,7 +650,7 @@ impl Renderer {
         for k in self.parts.boxes {
             self.objects[k].visible = o.grid_boxes;
         }
-        for k in 0..3 {
+        for k in [0, 1, 2, 4] {
             self.volumes[k].visible = o.bowl_ice;
         }
         self.volumes[3].visible = o.spoon_ice;
