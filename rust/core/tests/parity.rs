@@ -1,13 +1,54 @@
-//! Regression against frozen fixtures. They were written by the JS simulation this project started with
-//! (and its SO-101 arm), which the Rust core matched bit for bit; the JS is gone, the fixtures stay, so any
-//! change to the numerics shows up here. Behaviour changes on purpose: update the expectations, don't
-//! loosen the comparison.
+//! Regression against frozen fixtures. They were first written by the JS simulation this project started
+//! with (and its SO-101 arm), which the Rust core matched bit for bit; the JS is gone, the fixtures stay, so
+//! any change to the numerics shows up here. Behaviour changes on purpose: update the expectations, don't
+//! loosen the comparison. `UPDATE_FIXTURES=1 cargo test -p icecream-core --test parity` rewrites scoop,
+//! plunge and arm from the Rust core (then run it again without). Rewritten so far: smoothing keeps out of
+//! the spoon (scoop, plunge, arm).
 
 use icecream_core::math::{self, Quat, Vec3};
 use icecream_core::sdf::{bowls, FLAVORS};
 use icecream_core::sim::flavor_rgba;
 use icecream_core::robot::Arm;
 use icecream_core::Sim;
+
+/// Compare against the fixture, or with UPDATE_FIXTURES set, collect the row to rewrite it.
+fn check(name: &str, names: &[&str], rows: &[Vec<f64>], frame: usize, got: &[f64], out: &mut Vec<Vec<f64>>) {
+    if update() {
+        let mut row = vec![frame as f64];
+        row.extend_from_slice(got);
+        out.push(row);
+        return;
+    }
+    let r = &rows[frame - 1];
+    for k in 0..got.len() {
+        assert!(
+            got[k] == r[k + 1] || (got[k] - r[k + 1]).abs() <= 1e-15 * r[k + 1].abs(),
+            "{name}: frame {frame}: {} now {:e} fixture {:e}",
+            names[k],
+            got[k],
+            r[k + 1]
+        );
+    }
+}
+
+fn update() -> bool {
+    std::env::var_os("UPDATE_FIXTURES").is_some()
+}
+
+fn finish(name: &str, names: &[&str], rows: &[Vec<f64>], frame: usize, out: Vec<Vec<f64>>) {
+    if update() {
+        let mut csv = format!("frame,{}\n", names.join(","));
+        for r in out {
+            csv += &format!("{}\n", r.iter().enumerate().map(|(k, v)| if k == 0 { format!("{}", *v as usize) } else { format!("{v}") }).collect::<Vec<_>>().join(","));
+        }
+        let path = format!("{}/tests/fixtures/{name}.csv", env!("CARGO_MANIFEST_DIR"));
+        std::fs::write(&path, csv).unwrap();
+        println!("{name}: wrote {frame} frames to {path}");
+        return;
+    }
+    assert_eq!(frame, rows.len(), "{name}: fixture length");
+    println!("{name}: {frame} frames identical to the fixture");
+}
 
 enum Step {
     Go([f64; 6], usize),
@@ -22,6 +63,7 @@ fn run(name: &str, csv: &str, script: &[Step]) {
     let rows = parse(csv);
     let mut sim = Sim::default();
     let mut frame = 0usize;
+    let mut out = Vec::new();
     for s in script {
         match s {
             Step::Eat => {
@@ -31,7 +73,6 @@ fn run(name: &str, csv: &str, script: &[Step]) {
                 sim.set_target(Some(Vec3::new(t[0], t[1], t[2])), Some(Quat::from_euler(t[3], t[4], t[5])));
                 for _ in 0..*n {
                     sim.step(1.0 / 60.0);
-                    let r = &rows[frame];
                     frame += 1;
                     let sp = &sim.spoon;
                     let got = [
@@ -49,26 +90,18 @@ fn run(name: &str, csv: &str, script: &[Step]) {
                         sim.cut_force,
                         sim.eaten_volume,
                     ];
-                    let names = ["px", "py", "pz", "qx", "qy", "qz", "qw", "content", "bowl0", "particles", "debt", "cut", "eaten"];
-                    for k in 0..got.len() {
-                        assert!(
-                            got[k] == r[k + 1] || (got[k] - r[k + 1]).abs() <= 1e-15 * r[k + 1].abs(),
-                            "{name}: frame {frame}: {} rust {:e} js {:e}",
-                            names[k],
-                            got[k],
-                            r[k + 1]
-                        );
-                    }
+                    check(name, &NAMES, &rows, frame, &got, &mut out);
                 }
             }
         }
     }
-    assert_eq!(frame, rows.len(), "{name}: fixture length");
-    println!("{name}: {frame} frames identical to the JS simulation");
+    finish(name, &NAMES, &rows, frame, out);
 }
 
+const NAMES: [&str; 13] = ["px", "py", "pz", "qx", "qy", "qz", "qw", "content", "bowl0", "particles", "debt", "cut", "eaten"];
+
 #[test]
-fn scoop_matches_js() {
+fn scoop_matches_fixture() {
     let b = &bowls()[0];
     run(
         "scoop",
@@ -83,7 +116,7 @@ fn scoop_matches_js() {
 }
 
 #[test]
-fn plunge_matches_js() {
+fn plunge_matches_fixture() {
     let b = &bowls()[0];
     let mut script = Vec::new();
     for _ in 0..2 {
@@ -100,9 +133,9 @@ enum ArmStep {
     Joints([f64; 5], usize),
 }
 
-/// The SO-101 driving the spoon (`arm.constrain` -> `sim.step` -> `arm.follow`), against arm.js.
+/// The SO-101 driving the spoon (`arm.constrain` -> `sim.step` -> `arm.follow`), first written by arm.js.
 #[test]
-fn arm_matches_js() {
+fn arm_matches_fixture() {
     use std::f64::consts::PI;
     let script = [
         ArmStep::Go([0.0, 0.14, 0.02, 0.5], 80),
@@ -117,6 +150,7 @@ fn arm_matches_js() {
     let mut arm = Arm::default();
     arm.reset(Some(&mut sim.spoon));
     let mut frame = 0usize;
+    let mut out = Vec::new();
     let names = [
         "px", "py", "pz", "qx", "qy", "qz", "qw", "q0", "q1", "q2", "q3", "q4", "c0", "c1", "c2", "c3", "c4", "errMm", "errDeg", "content",
     ];
@@ -136,26 +170,16 @@ fn arm_matches_js() {
             arm.constrain(&mut sim.spoon, 1.0 / 60.0);
             sim.step(1.0 / 60.0);
             arm.follow(&sim.spoon);
-            let r = &rows[frame];
             frame += 1;
             let sp = &sim.spoon;
             let mut got = vec![sp.pos.x, sp.pos.y, sp.pos.z, sp.quat.x, sp.quat.y, sp.quat.z, sp.quat.w];
             got.extend(arm.q);
             got.extend(arm.q_cmd);
             got.extend([arm.err.mm, arm.err.deg, sim.content.volume()]);
-            for k in 0..got.len() {
-                assert!(
-                    got[k] == r[k + 1] || (got[k] - r[k + 1]).abs() <= 1e-15 * r[k + 1].abs(),
-                    "arm: frame {frame}: {} rust {:e} js {:e}",
-                    names[k],
-                    got[k],
-                    r[k + 1]
-                );
-            }
+            check("arm", &names, &rows, frame, &got, &mut out);
         }
     }
-    assert_eq!(frame, rows.len(), "arm: fixture length");
-    println!("arm: {frame} frames identical to the JS simulation");
+    finish("arm", &names, &rows, frame, out);
 }
 
 #[test]

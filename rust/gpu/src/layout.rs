@@ -152,7 +152,7 @@ impl Layout {
         let maxr = grids.iter().map(|g| g.count).max().unwrap();
         let nbins = bin_off;
         let w = Sections::new(&[
-            ("D", n), ("TS", n), ("DVD", maxr), ("DVC", maxr), ("PD", maxr), ("PC", maxr),
+            ("D", n), ("TS", n), ("TF", n), ("DVD", maxr), ("DVC", maxr), ("PD", maxr), ("PC", maxr),
             ("CNV", nc), ("RU0", nc), ("RU1", nc), ("FLOOR", nc), ("CB", nc),
             ("POS", 3 * CAP), ("PREV", 3 * CAP), ("VEL", 3 * CAP), ("DP", 3 * CAP), ("CN", 3 * CAP), ("SV", 3 * CAP),
             ("LAM", CAP), ("FPOS", 3 * CAP), ("SLOW", CAP),
@@ -224,6 +224,11 @@ impl Layout {
         ] {
             s += &format!("const {k}: f32 = {};\n", f(v));
         }
+        // spoon-local box outside which smoothing needs no keep-out (sim.rs keep_out_box, a bowl band wider)
+        let cg = &self.grids[3];
+        let size = [cg.n[0] as f64 * cg.c, cg.n[1] as f64 * cg.c, cg.n[2] as f64 * cg.c];
+        let (lo, hi) = icecream_core::sim::keep_out_box(cg.o, size, self.grids[0].band);
+        s += &format!("const KEEP_LO: vec3f = vec3f({}, {}, {});\nconst KEEP_HI: vec3f = vec3f({}, {}, {});\n", f(lo[0]), f(lo[1]), f(lo[2]), f(hi[0]), f(hi[1]), f(hi[2]));
         let join = |v: Vec<String>| v.join(", ");
         s += &format!(
             "\nvar<private> GO: array<vec4f, 4> = array({});\n",

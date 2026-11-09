@@ -6,6 +6,7 @@ use crate::fluid::{Collide, Fluid, CONTACT_NONE, CONTACT_SPOON, CONTACT_WORLD};
 use crate::grid::SdfGrid;
 use crate::math::{acos, cbrt, cos, hypot2, hypot3, js_round, pow, rad_to_deg, sin, Pose, Quat, Vec3};
 use crate::params::{FillShape, Params};
+use crate::grid::NO_FLOOR;
 use crate::sdf::{
     bowls, grad_local, nearest_bowl, sd_bowl, sd_ellipsoid, sd_env, sd_handle, sd_hull_interior, sd_spoon_shell,
     sd_spoon_solid, smin, FLAVORS, SPOON,
@@ -418,13 +419,18 @@ impl Sim {
         self.freeze_resting(tilt < release - 10.0, dt);
         self.pay_debts();
         let sm = self.params.ice.smoothing;
+        let tilted_now = tilt > release;
         for i in 0..3 {
-            self.grids[i].smooth_touched(sm);
-            self.grids[i].settle(sm, true);
+            let g = &self.grids[i];
+            {
+                let keep_out = spoon_keep_out(self.pose, &self.content, tilted_now, [g.ox, g.oy, g.oz, g.cell], [g.nx, g.ny], g.band);
+                self.grids[i].smooth_touched(sm, &keep_out);
+                self.grids[i].settle(sm, true, &keep_out);
+            }
             self.settle_residual(GridId::Bowl(i));
         }
         let content_edited = self.content.n_touched > 0;
-        self.content.smooth_touched(sm);
+        self.content.smooth_touched(sm, NO_FLOOR);
         if content_edited {
             self.redist_pending = true;
         }
@@ -433,7 +439,7 @@ impl Sim {
             self.redist_pending = self.content.settle_frames > 0;
         }
         for k in 0..3 {
-            self.content.settle(sm, k == 0);
+            self.content.settle(sm, k == 0, NO_FLOOR);
         }
         self.clamp_content();
         self.settle_residual(GridId::Content);
@@ -1558,4 +1564,53 @@ pub fn into_cup(x: f64, y: f64, z: f64, r: f64) -> [f64; 3] {
     let g = grad_local(sd_hull_interior, x, y, z);
     let k = d + r;
     [x - k * g[0], y - k * g[1], z - k * g[2]]
+}
+
+/// The lowest distance a bowl voxel may keep: what carving cuts away (spoon metal, the cup interior unless
+/// tilted, the ice on the spoon), as `-distance` to that. Smoothing a bowl must not refill it, or the next
+/// carve cuts that ice again and a spoon held still keeps pumping ice into the cup. Voxel `idx` of a grid
+/// with origin + cell `geo` and `n` = (nx, ny).
+pub fn spoon_keep_out<'a>(pose: Pose, content: &'a SdfGrid, tilted: bool, geo: [f64; 4], n: [usize; 2], band: f64) -> impl Fn(usize) -> f64 + 'a {
+    let [ox, oy, oz, c] = geo;
+    let [nx, ny] = n;
+    let pad = 0.4 * c;
+    let cg = content;
+    let (lo, hi) = keep_out_box([cg.ox, cg.oy, cg.oz], [cg.nx as f64 * cg.cell, cg.ny as f64 * cg.cell, cg.nz as f64 * cg.cell], band);
+    move |idx: usize| {
+        let (i, j, k) = (idx % nx, (idx / nx) % ny, idx / (nx * ny));
+        let (x, y, z) = (ox + (i as f64 + 0.5) * c, oy + (j as f64 + 0.5) * c, oz + (k as f64 + 0.5) * c);
+        let [lx, ly, lz] = pose.to_local(x, y, z);
+        // further than a band from all of it: the floor would sit below -band, where values are clamped anyway
+        if lx < lo[0] || ly < lo[1] || lz < lo[2] || lx > hi[0] || ly > hi[1] || lz > hi[2] {
+            return f64::NEG_INFINITY;
+        }
+        let mut d = (sd_spoon_shell(lx, ly, lz) - pad).min(sd_handle(lx, ly, lz) - pad);
+        let cs = content.sample(lx, ly, lz);
+        if cs < content.band * 0.999 {
+            // (at the band: outside the scoop's grid, or nothing near; not a distance)
+            d = d.min(cs);
+        }
+        if !tilted {
+            d = d.min(sd_hull_interior(lx, ly, lz));
+        }
+        -d
+    }
+}
+/// Spoon-local box around the spoon and the scoop's grid (origin `co`, size `cs`), `pad` wider on every side.
+pub fn keep_out_box(co: [f64; 3], cs: [f64; 3], pad: f64) -> ([f64; 3], [f64; 3]) {
+    let s = &SPOON;
+    let r = s.handle_r;
+    let mut lo = [-s.a - s.t, -s.b - s.t, -s.c - s.t];
+    let mut hi = [s.a + s.t, s.t, s.c + s.t];
+    for p in &s.handle {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k] - r);
+            hi[k] = hi[k].max(p[k] + r);
+        }
+    }
+    for k in 0..3 {
+        lo[k] = lo[k].min(co[k]) - pad;
+        hi[k] = hi[k].max(co[k] + cs[k]) + pad;
+    }
+    (lo, hi)
 }

@@ -87,7 +87,11 @@ async fn viewer_gets_the_scene_full_grids_then_patches() {
     let dig = [0.0, 0.2474, 0.0, 0.9689]; // 0.5 rad about Z
     ws.send(Message::Text(json!({ "type": "arm", "enabled": false }).to_string())).await.unwrap();
     assert_eq!(next_text(&mut ws).await["arm"]["enabled"], false);
-    ws.send(Message::Text(json!({ "type": "set_target", "position": [-0.02, 0.085, 0.0], "quaternion": dig }).to_string())).await.unwrap();
+    // above the ice first, then one step that drags the cup down through it, opening first (dig tilts the
+    // opening toward -x): the scoop fills during that step (pressing straight down would only cut)
+    ws.send(Message::Text(json!({ "type": "set_target", "position": [0.03, 0.15, 0.0], "quaternion": dig }).to_string())).await.unwrap();
+    ws.send(Message::Text(json!({ "type": "step", "frames": 120, "id": 6 }).to_string())).await.unwrap();
+    ws.send(Message::Text(json!({ "type": "set_target", "position": [-0.03, 0.088, 0.0], "quaternion": dig }).to_string())).await.unwrap();
     ws.send(Message::Text(json!({ "type": "step", "frames": 240, "id": 7 }).to_string())).await.unwrap();
     let mut reply = None;
     let mut last = None;

@@ -65,7 +65,11 @@ Ice cream exists in two forms that convert into each other:
 - **Freezing**: a particle that stays still relative to what it rests on for a few frames, or sinks halfway
   into ice, is smooth-min stamped back into the SDF (Claybook's `DieWhenStops` + `StampSDFWhenDies`).
 - **Surface tension**: every frame the edited voxels get one **volume-preserving** Laplacian smoothing pass,
-  then keep "settling" for 30 frames, so a scoop rounds into a ball without losing mass. While the scoop
+  then keep "settling" for 30 frames, so a scoop rounds into a ball without losing mass. In the bowls it
+  never fills what the spoon occupies (metal, cup interior, the scoop): otherwise the next carve cuts the
+  refilled ice again and a spoon held still pumps ice into the cup until it is full, or stops by chance,
+  which is also why GPU and CPU once scooped 16.8 vs 12.3 g from the same bowl. Pressing straight down
+  therefore scoops nothing (the metal cuts the ice before the cup gets there); dragging or lifting does. While the scoop
   changes, its SDF is rebuilt as a true distance field every few frames (fast sweeping), so crumbs that
   freeze on melt in instead of leaving lumps, and it may never grow under the outside of the cup.
 - **Tipping**: tilt the spoon past `slide-off tilt` and the scoop turns into particles and falls.
@@ -110,12 +114,14 @@ particles and the crumbs, and reads those back too. The cutting force uses the p
   | check | result |
   |---|---|
   | prefix scans, volume reduction | exact (u32), < 10⁻⁵ (f32) |
-  | volume-preserving smoothing + settling of 2,111 edited voxels | max difference 6·10⁻⁷ cell |
+  | volume-preserving smoothing + settling of 2,111 edited voxels, the spoon in them | max difference 5·10⁻⁶ cell |
   | 61 carve steps of a scoop | bowl grid within 7·10⁻⁶ cell; scoop volume, crumbs and owed ice identical |
-  | scoop, carry, eat (510 frames) | 17.8 g scooped (CPU 16.9 g), mass drift 0.009 g |
-  | tip-out | scoop gone, 1,827 particles, all frozen back 4 s later, drift 0.04 g |
-  | three plunges + eat | 52.4 g eaten, drift 0.01 g |
-  | the SO-101 carrying a GPU scoop | 17.7 g, arm within 0.32 mm of the spoon |
+  | scoop, carry, eat (510 frames) | 17.9 g scooped (CPU 18.2 g), mass drift 0.009 g |
+  | straight down into each bowl, held, lifted | held: no gain; lifted out 18.2 / 7.2 / 14.8 g (CPU 18.3 / 7.2 / 13.2 g) |
+  | tip-out | scoop gone, ~1,600 particles, frozen back 4 s later, drift 0.04 g |
+  | a scoop released on a level spoon | stays in the cup as one lump, as tall as on the CPU |
+  | three plunges + eat | 58.5 g eaten, drift 0.01 g |
+  | the SO-101 carrying a GPU scoop | 11.6 g, arm within 0.33 mm of the spoon |
   | two identical runs | bit-identical |
 
 - **Speed** (RTX 3080 Ti, Vulkan): a scoop takes ~2 ms/frame with the arm (CPU ~3–4 ms), 15,000 loose
@@ -264,12 +270,14 @@ window.__view.capturePNG(1280, 800);               // offscreen render of one fr
 
 ```bash
 just test     # cargo test: collision, mass, arm, fixture regression, the WebSocket server end to end
-just bench    # CPU: ~6 ms/frame, mass 2075.3 -> 2075.2 g; arm-driven scoop ~3 ms/frame; the same scoop on the GPU
+just bench    # CPU: ~6 ms/frame, mass 2075.3 -> 2075.3 g; arm-driven scoop ~4 ms/frame; the same scoop on the GPU ~1.6
 ```
 
 `rust/core/tests/parity.rs` replays scripted runs (a scoop, plunge-and-eat cycles, an arm-driven run) against
 fixtures the JavaScript simulation wrote when the Rust core was its bit-for-bit port. The JavaScript is gone;
-the fixtures stay as a regression net: any change to the numerics shows up there. (To match it the core
+the fixtures stay as a regression net: any change to the numerics shows up there. When a change is meant to
+alter the numbers, `UPDATE_FIXTURES=1` rewrites them from the Rust core (done once: smoothing keeping out of
+the spoon). (To match it the core
 keeps f32 storage where JS had `Float32Array`, V8's `Math.hypot`, V8's fdlibm `sin` / `cos` / `cbrt` in
 `v8math.rs`, and the same RNG.) `rust/cli/tests/web.rs` starts a real server and checks the hello, the full
 first frame, that a scoop sends only patches of the bowl it touched (and the scoop's colour, even when it

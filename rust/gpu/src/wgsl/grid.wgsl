@@ -139,8 +139,8 @@ fn boxGet(g: u32, k: u32) -> i32 { return bitcast<i32>(X[X_STU + 32u + g * 8u + 
 fn boxSet(g: u32, k: u32, v: i32) { X[X_STU + 32u + g * 8u + k] = bitcast<u32>(v); }
 
 /**
- * _writeVolumePreserving over LIST/TS[base .. base+n): values T - shift with the uniform shift that
- * keeps the enclosed volume (Newton in a shrinking bracket, 8 passes), residual to ST.
+ * _writeVolumePreserving over LIST/TS[base .. base+n): values T - shift (at least TF) with the uniform
+ * shift that keeps the enclosed volume (Newton in a shrinking bracket, 8 passes), residual to ST.
  */
 fn volumePreservingWrite(t: u32, g: u32, n: u32, vb: f32) {
   let c = GO[g].w;
@@ -154,7 +154,7 @@ fn volumePreservingWrite(t: u32, g: u32, n: u32, vb: f32) {
     var va = 0.0;
     var area = 0.0;
     for (var q = t; q < n; q += 256u) {
-      let v = clamp(W[W_TS + base + q] - shift, -band, band);
+      let v = clamp(max(W[W_TS + base + q] - shift, W[W_TF + base + q]), -band, band);
       let o = 0.5 - v / c;
       if (o >= 1.0) { va += 1.0; } else if (o > 0.0) { va += o; area += 1.0; }
     }
@@ -174,7 +174,7 @@ fn volumePreservingWrite(t: u32, g: u32, n: u32, vb: f32) {
   }
   var va = 0.0;
   for (var q = t; q < n; q += 256u) {
-    let v = clamp(W[W_TS + base + q] - shift, -band, band);
+    let v = clamp(max(W[W_TS + base + q] - shift, W[W_TF + base + q]), -band, band);
     W[W_D + base + X[X_LIST + base + q]] = v;
     va += occ(g, v);
   }
@@ -184,6 +184,23 @@ fn volumePreservingWrite(t: u32, g: u32, n: u32, vb: f32) {
     W[W_ST + S_residual + g] += (vb - va) * c * c * c;
     X[X_STU + SU_residualIdx + g] = X[X_LIST + base];
   }
+}
+
+// sim.rs spoon_keep_out: the lowest distance smoothing may leave in a bowl voxel, minus the distance to
+// what carving cuts (spoon metal, the cup interior unless tilted, the ice on the spoon), so smoothing
+// never refills it (a spoon held still would otherwise keep pumping ice into the cup). None for the scoop.
+const NO_FLOOR: f32 = -1e30;
+fn spoonKeepOut(g: u32, c: vec3u) -> f32 {
+  if (g == 3u) { return NO_FLOOR; }
+  let rel = GO[g].xyz + (vec3f(c) + 0.5) * GO[g].w - G.T.xyz;
+  let l = rel.x * G.R0.xyz + rel.y * G.R1.xyz + rel.z * G.R2.xyz; // R^T rel
+  if (any(l < KEEP_LO) || any(l > KEEP_HI)) { return NO_FLOOR; } // a band clear of all of it
+  let pad = 0.4 * GO[g].w;
+  var d = min(sdShell(l) - pad, sdHandle(l) - pad);
+  let cs = gsample(3u, l);
+  if (cs < GBAND[3] * 0.999) { d = min(d, cs); } // at the band: outside the scoop's grid or nothing near
+  if (G.g7.w <= G.g7.z) { d = min(d, sdHullInterior(l)); }
+  return -d;
 }
 
 // Smoothing one grid in four steps (P.i0 = (mode, grid, 0, 0), P.f0.x = strength):
@@ -244,6 +261,7 @@ fn smList(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid: v
     X[X_LIST + base + o] = idx;
     let k = select(P.f0.x * 0.5, P.f0.x, P.i0.x == 0);
     W[W_TS + base + o] = v + (lap(g, idx, c) - v) * k;
+    W[W_TF + base + o] = spoonKeepOut(g, c);
     vb = occ(g, v);
   }
   let tot = wgSum(lid.x, vb);

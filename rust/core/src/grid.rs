@@ -13,6 +13,9 @@ fn to_u8(v: f64) -> u8 {
     (v.trunc() as i64).rem_euclid(256) as u8
 }
 
+/// `floor` for `smooth_touched` / `settle` without a keep-out.
+pub const NO_FLOOR: &dyn Fn(usize) -> f64 = &|_| f64::NEG_INFINITY;
+
 #[derive(Clone, Debug)]
 pub struct SdfGrid {
     pub ox: f64,
@@ -30,6 +33,8 @@ pub struct SdfGrid {
     touched: Vec<u8>,
     touched_list: Vec<usize>,
     touched_val: Vec<f32>,
+    /// per entry of the list being written: the lowest value it may take (see `smooth_touched`)
+    touched_floor: Vec<f32>,
     pub n_touched: usize,
     pub dirty: bool,
     pub color_dirty: bool,
@@ -64,6 +69,7 @@ impl SdfGrid {
             touched: vec![0; n],
             touched_list: vec![0; n],
             touched_val: vec![0.0; n],
+            touched_floor: vec![f32::NEG_INFINITY; n],
             n_touched: 0,
             dirty: true,
             color_dirty: true,
@@ -201,6 +207,8 @@ impl SdfGrid {
 
     /// Write smoothed values T[0..n) into voxels L[0..n), shifting them uniformly so the
     /// enclosed volume is unchanged; what can't be restored is added to `residual`.
+    /// Writes the first n entries of the touched list (`touched_val`, at least `touched_floor`), shifted
+    /// together so the occupied volume stays the same; what can't be kept goes to `residual`.
     fn write_volume_preserving(&mut self, n: usize) {
         let c = self.cell;
         let band = self.band;
@@ -216,7 +224,7 @@ impl SdfGrid {
             let mut va = 0.0;
             let mut area = 0u32;
             for q in 0..n {
-                let mut v = self.touched_val[q] as f64 - shift;
+                let mut v = (self.touched_val[q] as f64 - shift).max(self.touched_floor[q] as f64);
                 if v > band {
                     v = band;
                 } else if v < -band {
@@ -247,7 +255,7 @@ impl SdfGrid {
         }
         let mut va = 0.0;
         for q in 0..n {
-            let mut v = self.touched_val[q] as f64 - shift;
+            let mut v = (self.touched_val[q] as f64 - shift).max(self.touched_floor[q] as f64);
             if v > band {
                 v = band;
             } else if v < -band {
@@ -302,8 +310,11 @@ impl SdfGrid {
             / 6.0
     }
 
-    /// One Jacobi Laplacian pass over this frame's edited voxels (and clear the list).
-    pub fn smooth_touched(&mut self, strength: f64) {
+    /// One Jacobi Laplacian pass over this frame's edited voxels (and clear the list). `floor(idx)` is the
+    /// lowest distance a voxel may end up with: the bowls pass the spoon's keep-out (what carving cuts), so
+    /// smoothing never pushes ice back into the spoon (which would cut it again: a stationary spoon would
+    /// keep pumping ice into the cup); `NO_FLOOR` for none.
+    pub fn smooth_touched(&mut self, strength: f64, floor: &dyn Fn(usize) -> f64) {
         let n = self.n_touched;
         if n == 0 {
             return;
@@ -315,6 +326,7 @@ impl SdfGrid {
                 let avg = self.neighbour_avg(idx);
                 let v = self.data[idx] as f64;
                 self.touched_val[q] = (v + (avg - v) * strength) as f32;
+                self.touched_floor[q] = floor(idx) as f32;
             }
             self.write_volume_preserving(n);
             self.dirty = true;
@@ -341,8 +353,9 @@ impl SdfGrid {
         self.settle_frames = 30;
     }
 
-    /// Keep smoothing the near-surface band of the recently edited region for a few frames.
-    pub fn settle(&mut self, strength: f64, consume: bool) {
+    /// Keep smoothing the near-surface band of the recently edited region for a few frames (`floor` as in
+    /// `smooth_touched`).
+    pub fn settle(&mut self, strength: f64, consume: bool, floor: &dyn Fn(usize) -> f64) {
         if self.settle_frames == 0 || strength <= 0.0 {
             return;
         }
@@ -371,6 +384,7 @@ impl SdfGrid {
                         let avg = self.neighbour_avg(idx);
                         self.touched_list[n] = idx;
                         self.touched_val[n] = (v + (avg - v) * strength * 0.5) as f32;
+                        self.touched_floor[n] = floor(idx) as f32;
                         n += 1;
                     }
                     i += 1;

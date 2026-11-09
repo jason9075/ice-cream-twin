@@ -88,9 +88,24 @@ fn smoothing_matches_the_cpu() {
     g.debug_write('W', g.l.w.get("D") + off, bytemuck::cast_slice(&grid.data));
     g.debug_write('X', g.l.x.get("FLAG") + off, bytemuck::cast_slice(&touched));
     let sm = cpu.params.ice.smoothing;
+    // the spoon sits in the ice there: smoothing keeps out of it on both
+    let (sp, sq) = (Vec3::new(-0.01, 0.094, 0.0), Quat::IDENTITY);
+    g.cpu.spoon.pos = sp;
+    g.cpu.spoon.quat = sq;
+    g.debug_globals(1.0 / 60.0);
+    let gm = &cpu.grids[1];
+    let keep_out = icecream_core::sim::spoon_keep_out(
+        icecream_core::math::Pose::new(sp, sq),
+        &cpu.content,
+        false,
+        [gm.ox, gm.oy, gm.oz, gm.cell],
+        [gm.nx, gm.ny],
+        gm.band,
+    );
+    let floored = (0..gm.n).filter(|&i| keep_out(i) > -gm.band).count();
     let grid = &mut cpu.grids[1];
-    grid.smooth_touched(sm);
-    grid.settle(sm, true);
+    grid.smooth_touched(sm, &keep_out);
+    grid.settle(sm, true, &keep_out);
     let resid = grid.take_residual();
     g.debug_run(|g, fr| {
         g.debug_smooth(fr, 1, 0, sm);
@@ -99,7 +114,7 @@ fn smoothing_matches_the_cpu() {
     let d = g.debug_read_f32(g.l.w.get("D") + off, grid.n as u32);
     let err = d.iter().zip(&grid.data).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max) as f64 / grid.cell;
     let st = g.debug_read_f32(g.l.w.get("ST"), 64);
-    eprintln!("smoothing {n_touched} voxels: max diff {err:.1e} cells, residual {:.4} vs {:.4} mm³", st[(st::RESIDUAL + 1) as usize] as f64 * 1e9, resid * 1e9);
+    eprintln!("smoothing {n_touched} voxels ({floored} under the spoon): max diff {err:.1e} cells, residual {:.4} vs {:.4} mm³", st[(st::RESIDUAL + 1) as usize] as f64 * 1e9, resid * 1e9);
     assert!(err < 1e-3);
     assert!((st[(st::RESIDUAL + 1) as usize] as f64 - resid).abs() < 1e-9);
 }
@@ -321,7 +336,7 @@ fn the_arm_carries_a_gpu_scoop() {
 /// Loose particles near the cup (y above `NEAR`): height (2nd to 98th percentile) and lowest point
 /// (2nd percentile) in metres, how many, and how many are below (in the bowl). From n x (f32 x, y, z, rgba).
 fn loose_extent(bytes: &[u8]) -> (f64, f64, usize, usize) {
-    let mut ys: Vec<f64> = bytes.chunks_exact(16).map(|p| f32::from_le_bytes(p[4..8].try_into().unwrap()) as f64).collect();
+    let mut ys: Vec<f64> = bytes.as_chunks::<16>().0.iter().map(|p| f32::from_le_bytes(p[4..8].try_into().unwrap()) as f64).collect();
     let below = ys.iter().filter(|&&y| y < NEAR).count();
     ys.retain(|&y| y >= NEAR);
     ys.sort_by(f64::total_cmp);
@@ -384,4 +399,41 @@ fn a_released_scoop_keeps_its_shape_like_the_cpu() {
     assert!(gh > 0.012 && ch > 0.012, "the lump flattened");
     assert!(gb <= g_before + 5 && cbw <= c_before + 5, "particles fell through or over the cup");
     assert!((gh - ch).abs() < 0.3 * ch);
+}
+
+/// Straight down into each bowl, held there, lifted: GPU and CPU scoop about the same, and holding the spoon
+/// still gains nothing (smoothing used to refill the cut next to the spoon, which cut it again: a pump that
+/// filled the cup to capacity, or not, depending on chance).
+#[test]
+fn a_held_spoon_scoops_nothing_more_in_every_bowl() {
+    for bi in 0..3 {
+        let Some(mut g) = gpu() else { return };
+        let mut c = Sim::default();
+        let b = &bowls()[bi];
+        let legs = [(Vec3::new(b.cx, 0.14, 0.0), 60), (Vec3::new(b.cx, 0.085, 0.0), 150), (Vec3::new(b.cx, 0.15, 0.0), 120)];
+        let (mut frame, mut held) = (0, [[0.0; 2]; 2]);
+        for (p, n) in legs {
+            g.cpu.spoon.set_target(Some(p), Some(Quat::IDENTITY));
+            c.set_target(Some(p), Some(Quat::IDENTITY));
+            for _ in 0..n {
+                g.step(1.0 / 60.0);
+                c.step(1.0 / 60.0);
+                frame += 1;
+                // the spoon reaches the bottom by frame ~140 and stays until 210
+                if frame == 160 || frame == 210 {
+                    held[usize::from(frame == 210)] = [g.state().scooped_grams, c.state().scooped_grams];
+                }
+            }
+        }
+        let (gs, cs) = (g.state().scooped_grams, c.state().scooped_grams);
+        eprintln!(
+            "bowl {bi}: held at the bottom {:.2} -> {:.2} g (GPU), {:.2} -> {:.2} g (CPU); lifted out {gs:.1} g vs {cs:.1} g",
+            held[0][0], held[1][0], held[0][1], held[1][1]
+        );
+        for (before, after) in held[0].iter().zip(&held[1]) {
+            // (crumbs settling onto the scoop add a little; the pump added ~10 g)
+            assert!(after - before < 1.0, "bowl {bi}: the held spoon kept scooping");
+        }
+        assert!(cs > 3.0 && (gs - cs).abs() < 0.2 * cs + 0.5, "bowl {bi}: GPU {gs:.1} g vs CPU {cs:.1} g");
+    }
 }
