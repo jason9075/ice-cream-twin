@@ -22,7 +22,7 @@ axum = { version = "0.7.9", features = ["ws"] }
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 winit = "0.30"
 egui = "0.29"
-egui-winit = { version = "0.29", default-features = false, features = ["links", "wayland", "x11"] }
+egui-winit = { version = "0.29", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 egui-wgpu = { version = "0.29", default-features = false, features = ["winit", "wayland", "x11"] }
 glam = "0.29"
 pollster = "0.3"
